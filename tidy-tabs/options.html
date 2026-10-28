@@ -1,0 +1,96 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Tidy Tabs</title>
+<style>
+  :root{--bg:#fafaf9;--card:#fff;--ink:#1c1917;--muted:#78716c;--line:#e7e5e4;--accent:#2563eb;--ok:#16a34a;--bad:#dc2626}
+  @media (prefers-color-scheme:dark){:root{--bg:#1c1917;--card:#292524;--ink:#fafaf9;--muted:#a8a29e;--line:#44403c}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 -apple-system,system-ui,sans-serif}
+  main{max-width:560px;margin:0 auto;padding:40px 20px 80px}
+  h1{font-size:22px;margin:0 0 4px;display:flex;align-items:center;gap:10px}
+  h1 small{font-size:13px;color:var(--muted);font-weight:400}
+  .lead{color:var(--muted);margin:0 0 28px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:16px}
+  h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0;border-top:1px solid var(--line)}
+  .row:first-of-type{border-top:0;padding-top:0}
+  .row label{flex:1}
+  .row .hint{display:block;font-size:13px;color:var(--muted);margin-top:2px}
+  select,input[type=password],input[type=number]{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+  select,input[type=password]{width:100%}
+  input[type=number]{width:84px}
+  input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent)}
+  .stack{display:flex;flex-direction:column;gap:6px}
+  .actions{display:flex;align-items:center;gap:12px;margin-top:4px}
+  button{font:inherit;padding:9px 16px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);cursor:pointer}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button:disabled{opacity:.5;cursor:default}
+  .toast{color:var(--ok);font-size:14px}
+  pre{margin:12px 0 0;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;font:12px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
+  .status{font-size:14px;color:var(--muted)}
+  .status b{color:var(--ink)}
+  footer a{color:inherit}
+  kbd{font:12px ui-monospace,Menlo,monospace;padding:1px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}
+</style></head>
+<body><main>
+  <h1>🧹 Tidy Tabs <small id="ver"></small></h1>
+  <p class="lead">Settings save automatically. Click the toolbar icon (or press <span id="shortcut"><kbd>Alt</kbd>+<kbd>T</kbd></span>) to tidy. Right-click it for Ungroup, Auto-tidy, and this page.</p>
+
+  <section>
+    <h2>Last run</h2>
+    <div class="status" id="last">Nothing yet.</div>
+    <div class="actions">
+      <button class="primary" id="tidyNow">Tidy now</button>
+      <button id="ungroup">Ungroup all</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Grouping <span class="toast" id="saved" style="float:right;text-transform:none;letter-spacing:0"></span></h2>
+    <div class="stack">
+      <select id="provider">
+        <option value="domain">By domain (no API key)</option>
+        <option value="ondevice">On-device — browser's built-in model (free, no key)</option>
+        <option value="gemini">AI — Gemini (Google key, free tier)</option>
+        <option value="anthropic">AI — Claude (Anthropic key)</option>
+        <option value="openai">AI — OpenAI key</option>
+      </select>
+      <input id="apiKey" type="password" placeholder="API key" autocomplete="off">
+      <div id="odBox" hidden style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--bg)">
+        <div class="status" id="odStatus">Checking built-in model…</div>
+        <div id="odBar" hidden style="height:6px;border-radius:3px;background:var(--line);margin-top:8px;overflow:hidden"><div id="odFill" style="height:100%;width:0;background:var(--accent);transition:width .3s"></div></div>
+        <div class="actions" style="margin-top:8px"><button id="odDownload" hidden>Download model</button></div>
+      </div>
+      <span class="hint">Stored only in this browser. In AI mode, tab titles and URLs are sent to the provider you pick; page contents are not.</span>
+    </div>
+    <div class="row" style="margin-top:14px"><label>Granularity<span class="hint">How finely to split. Balanced caps groups at 8 tabs; Specific separates every subject.</span></label>
+      <select id="granularity" style="width:auto"><option value="broad">Broad</option><option value="balanced">Balanced</option><option value="specific">Specific</option></select></div>
+    <div class="row"><label>Leave existing groups alone<span class="hint">Only loose tabs are sorted; new tabs join a matching group by name.</span></label><input id="keepGroups" type="checkbox"></div>
+    <div class="row"><label>Close duplicate tabs<span class="hint">Keeps the newest copy; never closes the tab you're on.</span></label><input id="closeDupes" type="checkbox"></div>
+    <div class="row"><label>Collect strays in an "Other" group<span class="hint">Off: strays stay loose, like Arc. On: a collapsed grey group at the bottom.</span></label><input id="otherGroup" type="checkbox"></div>
+  </section>
+
+  <section>
+    <h2>Protected tabs</h2>
+    <div class="status" id="protList">None yet. Right-click a page → <b>Never tidy this tab</b> to keep it out of groups (handy for Dia's pinned tabs).</div>
+    <div class="actions"><button id="protClear" hidden>Clear list</button></div>
+  </section>
+
+  <section>
+    <h2>Auto-tidy</h2>
+    <div class="row"><label>Tidy automatically<span class="hint">Runs once a new tab pushes you past the threshold. Never re-runs on the same set.</span></label><input id="autoTidy" type="checkbox"></div>
+    <div class="row"><label>Threshold<span class="hint">Loose tabs before it kicks in. The badge turns red here.</span></label><input id="autoThreshold" type="number" min="3" max="50"></div>
+  </section>
+
+
+  <section style="margin-top:28px">
+    <h2>Diagnostics</h2>
+    <div class="actions" style="margin-top:0">
+      <button id="diag">Check browser support</button>
+      <button id="testai">Test AI key</button>
+    </div>
+    <div class="status" id="diagOut" style="margin-top:12px;white-space:pre-line"></div>
+    <details id="rawWrap" hidden style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">Technical details</summary><pre id="out"></pre></details>
+  </section>
+  <footer style="margin-top:36px;text-align:center;color:var(--muted);font-size:13px">Made by Varun Puskur · <a href="https://github.com/varunpuskur/tidy-tabs">GitHub</a></footer>
+  <script src="options.js"></script>
+</main></body></html>
