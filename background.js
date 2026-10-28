@@ -129,7 +129,7 @@ async function tidy() {
 
 async function tidyInner() {
   const win = await focusedWindow();
-  const all = (await chrome.tabs.query({ windowId: win.id })).filter((t) => !t.pinned);
+  const all = (await inScope(await chrome.tabs.query({ windowId: win.id }))).filter((t) => !t.pinned);
   const { provider = "domain", apiKey = "", keepGroups = true, closeDupes = false, otherGroup = false, granularity = "balanced" } =
     await chrome.storage.sync.get(["provider", "apiKey", "keepGroups", "closeDupes", "otherGroup", "granularity"]);
 
@@ -180,12 +180,13 @@ async function tidyInner() {
 
   const skipped = [...refused].map(([id, err]) => ({ title: (byId[id]?.title || String(id)).slice(0, 40), err }));
   if (skipped.length) console.warn("Tidy Tabs: browser refused to group", skipped);
-  return { groups: made, tabs: todo.length, dupes, skipped };
+  const { scope = "window" } = await chrome.storage.sync.get("scope");
+  return { groups: made, tabs: todo.length, dupes, skipped, scope };
 }
 
 async function ungroup() {
   const win = await focusedWindow();
-  const tabs = await chrome.tabs.query({ windowId: win.id });
+  const tabs = await inScope(await chrome.tabs.query({ windowId: win.id }));
   const prot = await protectedSet();
   const ids = tabs.filter((t) => isWebTab(t) && !isProtected(t, prot) && t.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE).map((t) => t.id);
   if (ids.length) await withTimeout(chrome.tabs.ungroup(ids));
@@ -597,8 +598,23 @@ async function protectedSet() {
 }
 const isProtected = (t, set) => set.has(protectKey(t.url || t.pendingUrl || ""));
 
+// Scope: which tabs in the window are "mine right now". Browsers with spaces/profiles in one window (Dia)
+// don't tell extensions which space a tab belongs to, so "recently used" and "selected" are the proxies.
+async function inScope(tabs) {
+  const { scope = "window", scopeHours = 2 } = await chrome.storage.sync.get(["scope", "scopeHours"]);
+  if (scope === "highlighted") {
+    const hl = tabs.filter((t) => t.highlighted);
+    return hl.length > 1 ? hl : tabs;               // a lone active tab isn't a selection; fall back to everything
+  }
+  if (scope === "recent") {
+    const cutoff = Date.now() - Math.max(0.25, scopeHours) * 3600e3;
+    return tabs.filter((t) => (t.lastAccessed || 0) >= cutoff);
+  }
+  return tabs;
+}
+
 async function looseTabs(windowId) {
-  const tabs = await chrome.tabs.query({ windowId });
+  const tabs = await inScope(await chrome.tabs.query({ windowId }));
   const prot = await protectedSet();
   return tabs.filter((t) => isWebTab(t) && !isProtected(t, prot) && t.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE);
 }

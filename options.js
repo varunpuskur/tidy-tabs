@@ -10,14 +10,19 @@ const ask = (msg, ms = 60000) => Promise.race([
 
 // --- settings -------------------------------------------------------------------------------
 chrome.storage.sync
-  .get(["provider", "apiKey", "keepGroups", "closeDupes", "otherGroup", "granularity", "autoTidy", "autoThreshold"])
-  .then(({ provider = "domain", apiKey = "", keepGroups = true, closeDupes = false, otherGroup = false, granularity = "balanced", autoTidy = false, autoThreshold = 8 }) => {
+  .get(["provider", "apiKey", "keepGroups", "closeDupes", "otherGroup", "granularity", "scope", "scopeHours", "autoTidy", "autoThreshold"])
+  .then(({ provider = "domain", apiKey = "", keepGroups = true, closeDupes = false, otherGroup = false, granularity = "balanced", scope = "window", scopeHours = 2, autoTidy = false, autoThreshold = 8 }) => {
     $("provider").value = provider; $("apiKey").value = apiKey;
-    $("keepGroups").checked = keepGroups; $("closeDupes").checked = closeDupes; $("otherGroup").checked = otherGroup; $("granularity").value = granularity;
+    $("keepGroups").checked = keepGroups; $("closeDupes").checked = closeDupes; $("otherGroup").checked = otherGroup; $("granularity").value = granularity; $("scope").value = scope; $("scopeHours").value = scopeHours; scopeRows();
     $("autoTidy").checked = autoTidy; $("autoThreshold").value = autoThreshold;
   });
 
-$("save").onclick = async () => {
+function scopeRows() { $("scopeHoursRow").style.display = $("scope").value === "recent" ? "" : "none"; }
+$("scope").addEventListener("change", scopeRows);
+
+// Every setting saves itself the moment it changes — no Save button to forget.
+let saveTimer = null;
+async function saveSettings() {
   await chrome.storage.sync.set({
     provider: $("provider").value,
     apiKey: $("apiKey").value.trim(),
@@ -25,12 +30,20 @@ $("save").onclick = async () => {
     closeDupes: $("closeDupes").checked,
     otherGroup: $("otherGroup").checked,
     granularity: $("granularity").value,
+    scope: $("scope").value,
+    scopeHours: Math.max(0.5, parseFloat($("scopeHours").value) || 2),
     autoTidy: $("autoTidy").checked,
     autoThreshold: Math.max(3, parseInt($("autoThreshold").value, 10) || 8),
   });
   $("saved").textContent = "Saved";
-  setTimeout(() => ($("saved").textContent = ""), 1500);
-};
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => ($("saved").textContent = ""), 1200);
+}
+for (const id of ["provider", "keepGroups", "closeDupes", "otherGroup", "granularity", "scope", "scopeHours", "autoTidy", "autoThreshold"]) {
+  $(id).addEventListener("change", saveSettings);
+}
+// The key field saves as you type (debounced), so pasting a key is enough.
+$("apiKey").addEventListener("input", () => { clearTimeout($("apiKey")._t); $("apiKey")._t = setTimeout(saveSettings, 400); });
 
 // --- on-device model (Chrome's built-in Prompt API) ------------------------------------------
 // The download only progresses while something is waiting on it, and this page stays alive while
@@ -100,7 +113,8 @@ function describe(r) {
   const when = new Date(r.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   if (r.error) return `<b>Error</b> at ${when}: ${r.error}`;
   if (r.ungrouped != null) return `Ungrouped <b>${r.ungrouped}</b> tabs at ${when}.`;
-  let s = `Made <b>${r.groups}</b> group${r.groups === 1 ? "" : "s"} from ${r.tabs} tabs at ${when}.`;
+  const sc = r.scope === "recent" ? " (recently used only)" : r.scope === "highlighted" ? " (selected only)" : "";
+  let s = `Made <b>${r.groups}</b> group${r.groups === 1 ? "" : "s"} from ${r.tabs} tabs${sc} at ${when}.`;
   if (r.dupes) s += ` Closed ${r.dupes} duplicate${r.dupes === 1 ? "" : "s"}.`;
   if (r.skipped?.length) s += ` Couldn't group: ${r.skipped.map((x) => x.title).join(", ")}.`;
   return s;
