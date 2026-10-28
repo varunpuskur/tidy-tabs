@@ -511,7 +511,15 @@ async function diag() {
   const prot = await protectedSet();
   raw.protected = prot.size;
   const everything = await chrome.tabs.query({ windowId: win.id });
-  raw.tabs = everything.map((t) => ({ i: t.index, id: t.id, pinned: t.pinned, group: t.groupId, prot: isProtected(t, prot), title: (t.title || "").slice(0, 30), url: (t.url || t.pendingUrl || "").slice(0, 40) }));
+  const now = Date.now();
+  raw.tabs = everything.map((t) => ({
+    i: t.index, id: t.id, pinned: t.pinned, group: t.groupId, prot: isProtected(t, prot),
+    active: t.active, hl: t.highlighted, discarded: t.discarded, opener: t.openerTabId ?? null,
+    agoMin: t.lastAccessed ? Math.round((now - t.lastAccessed) / 60000) : null,
+    title: (t.title || "").slice(0, 30), url: (t.url || t.pendingUrl || "").slice(0, 40),
+  }));
+  raw.activeCount = everything.filter((t) => t.active).length;
+  raw.highlightedCount = everything.filter((t) => t.highlighted).length;
 
   let canGroup = null, why = "";
   const refused = [];
