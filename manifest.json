@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Tidy Tabs",
-  "version": "1.4.0",
-  "description": "One-click AI tab grouping, in the spirit of Arc's Tidy Tabs.",
+  "name": "Tidy Tabs — AI Tab Organizer & Group Manager",
+  "version": "1.8.0",
+  "description": "One click sorts your tabs into named AI groups. Free with Gemini, no account, no server. Works in Chrome, Dia, Brave & Edge.",
   "permissions": [
     "tabs",
     "tabGroups",
@@ -18,7 +18,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Tidy tabs (right-click for options)",
+    "default_title": "Tidy tabs — right-click for Settings",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
@@ -32,6 +32,13 @@
         "mac": "Alt+T"
       },
       "description": "Tidy tabs in the current window"
+    },
+    "undo": {
+      "suggested_key": {
+        "default": "Alt+Z",
+        "mac": "Alt+Z"
+      },
+      "description": "Undo the last tidy"
     }
   },
   "icons": {
@@ -40,5 +47,6 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "author": "Varun Puskur"
+  "author": "Varun Puskur",
+  "short_name": "Tidy Tabs"
 }

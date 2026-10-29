@@ -28,18 +28,25 @@
   pre{margin:12px 0 0;padding:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;font:12px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
   .status{font-size:14px;color:var(--muted)}
   .status b{color:var(--ink)}
+  .rule{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid var(--line)}
+  .rule:first-child{border-top:0}
+  .rule button,.sess button{font-size:12px;padding:4px 10px}
+  .sess{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--line)}
+  .sess:first-child{border-top:0}
+  .sess .meta{font-size:13px;color:var(--muted)}
   footer a{color:inherit}
   kbd{font:12px ui-monospace,Menlo,monospace;padding:1px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}
 </style></head>
 <body><main>
   <h1>🧹 Tidy Tabs <small id="ver"></small></h1>
-  <p class="lead">Settings save automatically. Click the toolbar icon (or press <span id="shortcut"><kbd>Alt</kbd>+<kbd>T</kbd></span>) to tidy. Right-click it for Ungroup, Auto-tidy, and this page.</p>
+  <p class="lead">Settings save automatically. <a href="#" id="openWelcome">Setup guide</a>. Click the toolbar icon (or press <span id="shortcut"><kbd>Alt</kbd>+<kbd>T</kbd></span>) to tidy; <span id="shortcutUndo"><kbd>Alt</kbd>+<kbd>Z</kbd></span> undoes it. Right-click the icon for Undo, Ungroup, Auto-tidy, and this page.</p>
 
   <section>
     <h2>Last run</h2>
     <div class="status" id="last">Nothing yet.</div>
     <div class="actions">
       <button class="primary" id="tidyNow">Tidy now</button>
+      <button id="undo">Undo last tidy</button>
       <button id="ungroup">Ungroup all</button>
     </div>
   </section>
@@ -62,8 +69,8 @@
       </div>
       <span class="hint">Stored only in this browser. In AI mode, tab titles and URLs are sent to the provider you pick; page contents are not.</span>
     </div>
-    <div class="row" style="margin-top:14px"><label>Scope<span class="hint">Which tabs to touch. Dia keeps every space in one window, so "Recently used" keeps other spaces out of it.</span></label>
-      <select id="scope" style="width:auto"><option value="window">Whole window</option><option value="recent">Recently used</option><option value="highlighted">Selected tabs only</option></select></div>
+    <div class="row" style="margin-top:14px"><label>Scope<span class="hint">"Current space" follows which space you're looking at (Dia). "Whole window" touches everything, including other spaces.</span></label>
+      <select id="scope" style="width:auto"><option value="space">Current space (Dia)</option><option value="recent">Recently used</option><option value="window">Whole window</option></select></div>
     <div class="row" id="scopeHoursRow"><label>Recently used means<span class="hint">Tabs you've opened or looked at within this many hours.</span></label>
       <span><input id="scopeHours" type="number" min="0.5" max="72" step="0.5" style="width:70px"> h</span></div>
     <div class="row"><label>Granularity<span class="hint">How finely to split. Balanced caps groups at 8 tabs; Specific separates every subject.</span></label>
@@ -71,6 +78,22 @@
     <div class="row"><label>Leave existing groups alone<span class="hint">Only loose tabs are sorted; new tabs join a matching group by name.</span></label><input id="keepGroups" type="checkbox"></div>
     <div class="row"><label>Close duplicate tabs<span class="hint">Keeps the newest copy; never closes the tab you're on.</span></label><input id="closeDupes" type="checkbox"></div>
     <div class="row"><label>Collect strays in an "Other" group<span class="hint">Off: strays stay loose, like Arc. On: a collapsed grey group at the bottom.</span></label><input id="otherGroup" type="checkbox"></div>
+  </section>
+
+  <section>
+    <h2>What it's learned</h2>
+    <div class="status" id="rulesList">Nothing yet. Move a tab out of a group, into a different group, or rename a group after a tidy, and Tidy Tabs remembers it for next time.</div>
+    <div class="actions"><button id="rulesClear" hidden>Forget everything</button></div>
+  </section>
+
+  <section>
+    <h2>Saved sessions</h2>
+    <div class="status" id="sessList">None saved. A session is a snapshot of this space's groups and tabs that you can bring back later.</div>
+    <div class="actions">
+      <button id="sessSave">Save current space</button>
+      <button id="sessExport" hidden>Export all (JSON)</button>
+      <label><input id="sessImport" type="file" accept="application/json" hidden><button id="sessImportBtn">Import</button></label>
+    </div>
   </section>
 
   <section>

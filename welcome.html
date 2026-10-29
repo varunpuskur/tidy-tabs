@@ -1,0 +1,75 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Welcome to Tidy Tabs</title>
+<style>
+  :root{--bg:#fafaf9;--card:#fff;--ink:#1c1917;--muted:#78716c;--line:#e7e5e4;--accent:#2563eb;--ok:#16a34a;--bad:#dc2626}
+  @media (prefers-color-scheme:dark){:root{--bg:#1c1917;--card:#292524;--ink:#fafaf9;--muted:#a8a29e;--line:#44403c}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,system-ui,sans-serif}
+  main{max-width:600px;margin:0 auto;padding:56px 20px 80px}
+  h1{font-size:30px;margin:0 0 6px}
+  .lead{color:var(--muted);margin:0 0 32px;font-size:17px}
+  .step{display:flex;gap:16px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:14px}
+  .n{flex:none;width:32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .step h2{font-size:17px;margin:2px 0 6px}
+  .step p{margin:0 0 8px;color:var(--muted)}
+  .step p b{color:var(--ink)}
+  a{color:var(--accent)}
+  .pick{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+  .opt{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;cursor:pointer;background:var(--bg)}
+  .opt:hover{border-color:var(--accent)}
+  .opt input[type=radio]{accent-color:var(--accent)}
+  .opt .t{font-weight:600}.opt .d{font-size:14px;color:var(--muted)}
+  input[type=password]{width:100%;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:10px}
+  button{font:inherit;padding:10px 18px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);cursor:pointer}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button:disabled{opacity:.5;cursor:default}
+  .status{font-size:14px;margin-top:8px;min-height:20px}
+  .ok{color:var(--ok)}.bad{color:var(--bad)}
+  .done{text-align:center;margin-top:28px;color:var(--muted);font-size:14px}
+  kbd{font:13px ui-monospace,Menlo,monospace;padding:1px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}
+  .hidden{display:none}
+</style></head>
+<body><main>
+  <h1>🧹 Welcome to Tidy Tabs</h1>
+  <p class="lead">Two minutes of setup, then one click sorts your tabs into named groups.</p>
+
+  <div class="step">
+    <div class="n">1</div>
+    <div style="flex:1">
+      <h2>Pick how to group</h2>
+      <p>Topic grouping needs a small AI model. Nothing goes through any server of mine.</p>
+      <div class="pick">
+        <label class="opt"><input type="radio" name="prov" value="gemini" checked><span><div class="t">Gemini — free</div><div class="d">Google's free tier, no card needed. Recommended for Dia.</div></span></label>
+        <label class="opt" id="odOpt"><input type="radio" name="prov" value="ondevice"><span><div class="t">On-device — free, fully local</div><div class="d" id="odDesc">Uses the browser's built-in model. Checking availability…</div></span></label>
+        <label class="opt"><input type="radio" name="prov" value="anthropic"><span><div class="t">Claude</div><div class="d">Anthropic key, ~$0.0003 per tidy.</div></span></label>
+        <label class="opt"><input type="radio" name="prov" value="openai"><span><div class="t">OpenAI</div><div class="d">OpenAI key, ~$0.0003 per tidy.</div></span></label>
+        <label class="opt"><input type="radio" name="prov" value="domain"><span><div class="t">No AI — group by website</div><div class="d">Works offline, but it's grouping by site, not by topic.</div></span></label>
+      </div>
+    </div>
+  </div>
+
+  <div class="step" id="keyStep">
+    <div class="n">2</div>
+    <div style="flex:1">
+      <h2 id="keyTitle">Get a free Gemini key</h2>
+      <p id="keyHelp">Open <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a> → <b>Create API key</b> → copy it (starts with <code>AIza</code>). Free tier covers hundreds of tidies a day.</p>
+      <input id="apiKey" type="password" placeholder="Paste your key here" autocomplete="off">
+      <div class="status" id="keyStatus"></div>
+      <div style="margin-top:8px"><button id="test">Test key</button></div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">3</div>
+    <div style="flex:1">
+      <h2>Tidy</h2>
+      <p><b>Clicking the broom tidies immediately</b> — no popup. Or press <span id="shortcut"><kbd>Alt</kbd>+<kbd>T</kbd></span>. <b>Right-click the broom</b> for Settings, Undo, Ungroup and Auto-tidy.</p>
+      <p id="diaNote" class="hidden"><b>Using Dia?</b> Dia keeps every space in one window and doesn't tell extensions which is which, so by default Tidy Tabs touches only tabs you've used in the last 2 hours. Change this under <b>Scope</b> in Settings. Mark pinned tabs with right-click → <b>Never tidy this tab</b> to keep them safe.</p>
+      <div style="margin-top:10px;display:flex;gap:10px"><button class="primary" id="tidy">🧹 Tidy my tabs now</button><button id="settings">Open settings</button></div>
+      <div class="status" id="tidyStatus"></div>
+    </div>
+  </div>
+
+  <p class="done">You can reopen this page anytime from Settings. · <a href="https://github.com/varunpuskur/tidy-tabs" target="_blank">GitHub</a></p>
+  <script src="welcome.js"></script>
+</main></body></html>

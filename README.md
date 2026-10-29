@@ -1,4 +1,4 @@
-# 🧹 Tidy Tabs
+# 🧹 Tidy Tabs — AI Tab Organizer & Group Manager
 
 One-click AI tab grouping, in the spirit of Arc's Tidy Tabs. Click the broom, and your loose tabs get sorted into named groups — "LEGO", "Japan trip", "CS50" — the way you'd organize them by hand.
 
@@ -8,12 +8,23 @@ Works in **Dia, Chrome, Brave, Edge**, and any other Chromium browser with nativ
 
 ## What it does
 
+Tidy Tabs is a tab organizer and tab manager that groups your open tabs by topic with one click, using the AI provider of your choice.
+
 - **Click the icon → tidy.** Loose tabs are grouped by topic with sensible names and colors. Pinned tabs and tabs already in a group are left alone.
 - **Re-tidy anytime.** New tabs join an existing group if the name fits ("Japan trip" picks up a new flight tab), otherwise they get a new one. If you rename a group, the new name is respected.
 - **Everyday tools stay loose.** Gmail, Calendar, Drive and the like aren't forced into topic groups.
 - **Auto-tidy** (optional): once loose tabs pass a threshold you set, it tidies on its own. The badge shows your loose-tab count and turns red at the threshold.
 - **Close duplicates** (optional): keeps the newest copy, never closes the tab you're looking at.
 - **Keyboard shortcut:** `Alt+T` (`⌥ Option+T` on Mac). Right-click the icon or any page for Tidy / Ungroup all / Auto-tidy / Settings.
+
+## What's new in 1.8
+
+- **Undo** (⌥Z / Alt+Z) puts everything back after a tidy.
+- **Learns from corrections** — drag a tab out of a group, into another group, or rename a group, and it remembers next time. See *What it's learned* in Settings.
+- **Sessions** — save a space's groups and tabs; restore later; export/import as JSON.
+- **Current-space scope for Dia** — tidies only the space you're looking at, including tabs you haven't clicked.
+- **Welcome page** on first install walks through getting a free Gemini key.
+- **Granularity** control (Broad / Balanced / Specific) and a "Never tidy this tab" right-click option.
 
 ## Install (2 minutes)
 

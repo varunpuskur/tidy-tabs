@@ -8,24 +8,48 @@ const COLORS = ["blue", "red", "yellow", "green", "pink", "purple", "cyan", "ora
 // =============================================================================================
 
 chrome.action.onClicked.addListener(() => runWithFeedback(tidy));
-chrome.commands.onCommand.addListener((cmd) => { if (cmd === "tidy") runWithFeedback(tidy); });
+chrome.commands.onCommand.addListener((cmd) => {
+  if (cmd === "tidy") runWithFeedback(tidy);
+  else if (cmd === "undo") runWithFeedback(undoTidy);
+});
 
 chrome.runtime.onInstalled.addListener(buildMenus);
 chrome.runtime.onStartup.addListener(buildMenus);
+
+chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  if (reason !== "install") return;
+  // Dia keeps every space in one window and doesn't say which is which; "recently used" is the safer default there.
+  const { scope } = await chrome.storage.sync.get("scope");
+  if (!scope) await chrome.storage.sync.set({ scope: isDiaLike() ? "space" : "window", scopeHours: 2 });
+  chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") });
+});
+chrome.runtime.onInstalled.addListener(async ({ reason }) => {
+  if (reason !== "update") return;
+  const { scope, scopeMigrated } = await chrome.storage.sync.get(["scope", "scopeMigrated"]);
+  if (!scopeMigrated && isDiaLike() && (scope === "recent" || !scope)) await chrome.storage.sync.set({ scope: "space", scopeMigrated: true });
+});
+chrome.runtime.onMessage.addListener((msg) => { if (msg.type === "welcome") chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") }); });
+
+// Dia doesn't put its name in the UA. Its tell: a LanguageModel API on a very recent Chromium, plus chrome://assistant tabs.
+function isDiaLike() {
+  return /\bDia\b/i.test(navigator.userAgent) || (typeof LanguageModel !== "undefined" && /Chrome\/1[5-9]\d/.test(navigator.userAgent));
+}
 chrome.storage.onChanged.addListener((c) => { if (c.autoTidy) buildMenus(); });
 
 async function buildMenus() {
   const { autoTidy = false } = await chrome.storage.sync.get("autoTidy");
   await chrome.contextMenus.removeAll();
   const contexts = ["action", "page"];
+  chrome.contextMenus.create({ id: "settings", title: "⚙️ Settings…", contexts });
+  chrome.contextMenus.create({ id: "sep0", type: "separator", contexts });
   chrome.contextMenus.create({ id: "tidy", title: "🧹 Tidy tabs", contexts });
+  chrome.contextMenus.create({ id: "undo", title: "Undo last tidy", contexts });
   chrome.contextMenus.create({ id: "ungroup", title: "Ungroup all", contexts });
   chrome.contextMenus.create({ id: "sep", type: "separator", contexts });
   chrome.contextMenus.create({ id: "protect", title: "Never tidy this tab", contexts: ["page"] });
   chrome.contextMenus.create({ id: "unprotect", title: "Allow tidying this tab again", contexts: ["page"] });
   chrome.contextMenus.create({ id: "sep2", type: "separator", contexts });
   chrome.contextMenus.create({ id: "auto", title: "Auto-tidy", type: "checkbox", checked: autoTidy, contexts });
-  chrome.contextMenus.create({ id: "settings", title: "Settings…", contexts });
 }
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -39,6 +63,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
   if (info.menuItemId === "tidy") runWithFeedback(tidy);
+  else if (info.menuItemId === "undo") runWithFeedback(undoTidy);
   else if (info.menuItemId === "ungroup") runWithFeedback(ungroup);
   else if (info.menuItemId === "auto") chrome.storage.sync.set({ autoTidy: !!info.checked });
   else if (info.menuItemId === "settings") chrome.runtime.openOptionsPage();
@@ -48,6 +73,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   const run = (fn) => fn().then(reply).catch((e) => reply({ error: errMsg(e) }));
   if (msg.type === "tidy") { run(() => runWithFeedback(tidy)); return true; }
   if (msg.type === "ungroup") { run(() => runWithFeedback(ungroup)); return true; }
+  if (msg.type === "undo") { run(() => runWithFeedback(undoTidy)); return true; }
+  if (msg.type === "saveSession") { run(() => saveSession(msg.name)); return true; }
+  if (msg.type === "restoreSession") { run(() => runWithFeedback(() => restoreSession(msg.index))); return true; }
+  if (msg.type === "rules") { run(async () => ({ rules: await loadRules() })); return true; }
+  if (msg.type === "forgetRule") { run(async () => { await saveRules((await loadRules()).filter((_, i) => i !== msg.index)); return { ok: true }; }); return true; }
+  if (msg.type === "forgetAll") { run(async () => { await chrome.storage.sync.set({ rules: [] }); return { ok: true }; }); return true; }
   if (msg.type === "diag") { run(diag); return true; }
   if (msg.type === "testai") { run(testAI); return true; }
 });
@@ -63,6 +94,29 @@ async function runWithFeedback(fn) {
   setTimeout(refreshBadge, 2500);
   return result;
 }
+
+// =============================================================================================
+// Event log (diagnostic): records tab events so we can see what Dia emits when spaces change.
+// Kept to the last 60 entries in local storage; shown under "Technical details".
+// =============================================================================================
+
+async function logEvent(kind, detail) {
+  try {
+    const { evlog = [] } = await chrome.storage.local.get("evlog");
+    evlog.push({ t: Date.now(), kind, ...detail });
+    await chrome.storage.local.set({ evlog: evlog.slice(-60) });
+  } catch {}
+}
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  let t = null; try { t = await chrome.tabs.get(tabId); } catch {}
+  logEvent("activated", { id: tabId, index: t?.index, title: (t?.title || "").slice(0, 30) });
+});
+chrome.tabs.onMoved.addListener((id, info) => logEvent("moved", { id, from: info.fromIndex, to: info.toIndex }));
+chrome.tabs.onCreated.addListener((t) => logEvent("created", { id: t.id, index: t.index, url: (t.url || t.pendingUrl || "").slice(0, 40) }));
+chrome.tabs.onRemoved.addListener((id) => logEvent("removed", { id }));
+chrome.tabs.onHighlighted.addListener((info) => logEvent("highlighted", { ids: info.tabIds.slice(0, 10), n: info.tabIds.length }));
+chrome.windows.onFocusChanged.addListener((w) => logEvent("winfocus", { w }));
+chrome.tabs.onUpdated.addListener((id, info) => { if (info.discarded !== undefined || info.pinned !== undefined) logEvent("updated", { id, ...info }); });
 
 // =============================================================================================
 // Badge (loose-tab count) and auto-tidy
@@ -148,19 +202,44 @@ async function tidyInner() {
 
   const prot = await protectedSet();
   const tabs = all.filter((t) => isWebTab(t) && !isProtected(t, prot));
-  if (tabs.length < 2) return { groups: 0, tabs: tabs.length, dupes, skipped: [] };
+  if (tabs.length < 2) {
+    const { scope = "window" } = await chrome.storage.sync.get("scope");
+    const hint = scope === "space" && tabs.length === 0 ? " Click a tab in the space you want tidied first, so I know which space you're in." : "";
+    return { groups: 0, tabs: tabs.length, dupes, skipped: [], note: hint.trim() };
+  }
 
   const existing = await queryGroups(win.id);
   const todo = keepGroups ? tabs.filter((t) => t.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) : tabs;
-  if (todo.length === 0) return { groups: 0, tabs: 0, dupes, skipped: [] };
+  await snapshotForUndo(tabs, existing, dupes);
+  if (todo.length === 0) {
+    const { scope = "window" } = await chrome.storage.sync.get("scope");
+    const note = tabs.length
+      ? `All ${tabs.length} tab${tabs.length === 1 ? "" : "s"} in ${scope === "space" ? "this space" : "scope"} are already grouped. Turn off "Leave existing groups alone" to re-sort them.`
+      : "";
+    return { groups: 0, tabs: 0, dupes, skipped: [], note };
+  }
+
+  // Remember which space this tidy is for (Dia can only group tabs in the space that's showing).
+  const startRun = await currentRunId(win.id);
 
   const plan = (provider === "domain" || (provider !== "ondevice" && !apiKey))
     ? byDomain(todo)
     : await byAI(todo, existing.map((g) => g.title).filter(Boolean), provider, apiKey, granularity);
 
+  // If the person switched spaces while the model was thinking, wait (up to 20s) for them to come back;
+  // grouping tabs in a hidden space is refused by Dia and leaves half-made groups behind.
+  const { scope: scopeNow = "window" } = await chrome.storage.sync.get("scope");
+  if (scopeNow === "space" && startRun !== null) {
+    const ok = await waitForRun(win.id, startRun, 20_000);
+    if (!ok) {
+      await setBadge("↩", "#d97706"); setTimeout(refreshBadge, 4000);
+      return { groups: 0, tabs: todo.length, dupes, skipped: [], note: "You switched spaces while I was sorting, so I stopped. Go back to that space and tidy again." };
+    }
+  }
+
   const byId = Object.fromEntries(todo.map((t) => [t.id, t]));
   const refused = new Map();   // tabId -> error; a tab the browser refuses once is skipped for the rest of the run
-  let made = 0;
+  let made = 0, aborted = false;
 
   for (const [title, ids] of Object.entries(plan)) {
     const isOther = /^other$/i.test(title.trim());
@@ -172,6 +251,9 @@ async function tidyInner() {
     if (match) { await addToGroup(match.id, valid, refused); continue; }
     if (!isOther && valid.length < 2) continue;
 
+    if (scopeNow === "space" && startRun !== null && (await currentRunId(win.id)) !== startRun) {
+      if (!(await waitForRun(win.id, startRun, 15_000))) { aborted = true; break; }
+    }
     const groupId = await makeGroup(valid, win.id, refused);
     if (groupId == null) continue;
     if (isOther) await updateGroup(groupId, { title: "Other", color: "grey", collapsed: true });
@@ -180,11 +262,238 @@ async function tidyInner() {
 
   const skipped = [...refused].map(([id, err]) => ({ title: (byId[id]?.title || String(id)).slice(0, 40), err }));
   if (skipped.length) console.warn("Tidy Tabs: browser refused to group", skipped);
+  await rememberPlacements(win.id, todo);
   const { scope = "window" } = await chrome.storage.sync.get("scope");
-  return { groups: made, tabs: todo.length, dupes, skipped, scope };
+  let warn = lastUpdateError ? `Couldn't set a group's name/color: ${lastUpdateError}` : "";
+  if (aborted) warn = `Stopped partway because you switched spaces — ${made} group${made === 1 ? "" : "s"} made. Go back and tidy again to finish.`;
+  lastUpdateError = "";
+  return { groups: made, tabs: todo.length, dupes, skipped, scope, note: warn };
+}
+
+// =============================================================================================
+// Sessions: a named snapshot of the in-scope tabs and their groups. Local only; export/import as JSON.
+// =============================================================================================
+
+async function saveSession(name) {
+  const win = await focusedWindow();
+  const all = await inScope(await chrome.tabs.query({ windowId: win.id }));
+  const prot = await protectedSet();
+  const tabs = all.filter((t) => isWebTab(t) && !isProtected(t, prot));
+  const groups = await queryGroups(win.id);
+  const byGroup = new Map();
+  const loose = [];
+  for (const t of tabs) {
+    const rec = { url: t.url, title: (t.title || "").slice(0, 120) };
+    if (t.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) loose.push(rec);
+    else (byGroup.get(t.groupId) || byGroup.set(t.groupId, []).get(t.groupId)).push(rec);
+  }
+  const session = {
+    name, at: Date.now(),
+    groups: [...byGroup].map(([gid, tabs]) => { const g = groups.find((x) => x.id === gid); return { title: g?.title || "", color: g?.color || "grey", tabs }; }),
+    loose,
+  };
+  const { sessions = [] } = await chrome.storage.local.get("sessions");
+  await chrome.storage.local.set({ sessions: [session, ...sessions].slice(0, 50) });
+  return { saved: true, name, groups: session.groups.length, tabs: tabs.length };
+}
+
+async function restoreSession(index) {
+  busySince = Date.now();
+  try { return await restoreInner(index); } finally { busySince = 0; }
+}
+async function restoreInner(index) {
+  const { sessions = [] } = await chrome.storage.local.get("sessions");
+  const sess = sessions[index];
+  if (!sess) return { error: "That session no longer exists" };
+  const win = await focusedWindow();
+  const open = await chrome.tabs.query({ windowId: win.id });
+  const openByUrl = new Map(open.map((t) => [(t.url || "").replace(/#.*$/, ""), t]));
+  let opened = 0, alreadyOpen = 0, groupsMade = 0;
+  const ensure = async (rec) => {
+    const key = (rec.url || "").replace(/#.*$/, "");
+    const hit = openByUrl.get(key);
+    if (hit) { alreadyOpen++; return hit.id; }
+    const t = await chrome.tabs.create({ windowId: win.id, url: rec.url, active: false });
+    openByUrl.set(key, t); opened++;
+    return t.id;
+  };
+  for (const g of sess.groups) {
+    const ids = [];
+    for (const rec of g.tabs) { try { ids.push(await ensure(rec)); } catch {} }
+    if (!ids.length) continue;
+    await sleep(300);   // let the new tabs register before grouping
+    try {
+      const existing = (await queryGroups(win.id)).find((x) => (x.title || "").toLowerCase() === (g.title || "").toLowerCase());
+      if (existing) await group({ tabIds: ids, groupId: existing.id });
+      else { const gid = await group({ tabIds: ids, createProperties: { windowId: win.id } }); await updateGroup(gid, { title: g.title, color: g.color }); groupsMade++; }
+    } catch {}
+  }
+  for (const rec of sess.loose) { try { await ensure(rec); } catch {} }
+  return { restoredSession: true, name: sess.name, opened, alreadyOpen, groups: groupsMade };
+}
+
+// =============================================================================================
+// Learning from corrections
+// Stored as short plain-language rules (not examples) — cheaper in tokens and, per the BYOC paper,
+// more accurate than replaying past cases. Each rule is one line in the prompt's Preferences block.
+// Rules: { kind, site, group?, from?, to?, text, at, hits }
+//   never   — "never group <site>"                           (tab pulled out of a group, twice → protect too)
+//   prefer  — "<site> belongs in <group>"                    (tab moved into a different group)
+//   rename  — "call the group about <oldName> '<newName>'"   (group renamed after tidy)
+//   nogroup — "don't make a group called <name>"             (group dissolved soon after tidy)
+// =============================================================================================
+
+const MAX_RULES = 80;
+const PLACEMENT_TTL = 2 * 3600e3;   // only treat moves within 2h of a tidy as corrections
+
+async function rememberPlacements(windowId, tabs) {
+  const now = Date.now();
+  const live = await chrome.tabs.query({ windowId });
+  const groups = await queryGroups(windowId);
+  const gTitle = Object.fromEntries(groups.map((g) => [g.id, g.title || ""]));
+  const placements = {};
+  for (const t of live) {
+    if (!tabs.some((x) => x.id === t.id)) continue;
+    placements[t.id] = { site: siteOf(t.url), title: (t.title || "").slice(0, 60), groupId: t.groupId, groupTitle: gTitle[t.groupId] || "", at: now };
+  }
+  const groupNames = Object.fromEntries(groups.map((g) => [g.id, { title: g.title || "", at: now }]));
+  await chrome.storage.local.set({ placements, groupNames });
+}
+
+function siteOf(url) {
+  try { const u = new URL(url || ""); return /^https?:$/.test(u.protocol) ? u.hostname.replace(/^www\./, "") : ""; } catch { return ""; }
+}
+
+async function loadRules() { return (await chrome.storage.sync.get("rules")).rules || []; }
+async function saveRules(rules) {
+  rules.sort((a, b) => b.at - a.at);
+  await chrome.storage.sync.set({ rules: rules.slice(0, MAX_RULES) });
+}
+async function addRule(rule) {
+  const rules = await loadRules();
+  const same = rules.find((r) => r.kind === rule.kind && r.site === rule.site && (r.group || "") === (rule.group || "") && (r.from || "") === (rule.from || ""));
+  if (same) { same.hits = (same.hits || 1) + 1; same.at = Date.now(); same.text = rule.text; }
+  else rules.push({ ...rule, at: Date.now(), hits: 1 });
+  // a site pulled out of groups twice is clearly "leave me alone": protect it
+  if (rule.kind === "never") {
+    const r = rules.find((x) => x.kind === "never" && x.site === rule.site);
+    if (r && r.hits >= 2) {
+      const { protectedUrls = [] } = await chrome.storage.sync.get("protectedUrls");
+      const key = "https://" + rule.site;
+      if (!protectedUrls.includes(key)) await chrome.storage.sync.set({ protectedUrls: [...protectedUrls, key] });
+    }
+  }
+  await saveRules(rules);
+}
+
+// A tab's group changed. Was it one we placed, and did a person move it?
+chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+  if (info.groupId === undefined || isBusy()) return;
+  const { placements = {}, groupNames = {} } = await chrome.storage.local.get(["placements", "groupNames"]);
+  const p = placements[tabId];
+  if (!p || Date.now() - p.at > PLACEMENT_TTL || !p.site) return;
+  if (info.groupId === p.groupId) return;
+  if (p.groupId !== -1 && info.groupId === -1) {
+    // pulled out of a group we made
+    await addRule({ kind: "never", site: p.site, group: p.groupTitle, text: `Do not put ${p.site} in a group${p.groupTitle ? ` (it was removed from "${p.groupTitle}")` : ""}.` });
+  } else if (info.groupId !== -1) {
+    let to = "";
+    try { to = (await withTimeout(chrome.tabGroups.get(info.groupId), 3000)).title || ""; } catch {}
+    if (to && to.toLowerCase() !== p.groupTitle.toLowerCase()) {
+      await addRule({ kind: "prefer", site: p.site, group: to, text: `${p.site} belongs in "${to}"${p.groupTitle ? ` rather than "${p.groupTitle}"` : ""}.` });
+    }
+  }
+  placements[tabId] = { ...p, groupId: info.groupId };
+  await chrome.storage.local.set({ placements });
+});
+
+// A group we made was renamed → prefer that name. Removed soon after → don't make it again.
+chrome.tabGroups.onUpdated.addListener(async (g) => {
+  if (isBusy()) return;
+  const { groupNames = {} } = await chrome.storage.local.get("groupNames");
+  const known = groupNames[g.id];
+  if (!known || Date.now() - known.at > PLACEMENT_TTL) return;
+  const was = known.title, now = g.title || "";
+  if (now && was && now.toLowerCase() !== was.toLowerCase()) {
+    await addRule({ kind: "rename", site: "", from: was, group: now, text: `Call the group you would name "${was}" "${now}" instead.` });
+    groupNames[g.id] = { ...known, title: now };
+    await chrome.storage.local.set({ groupNames });
+  }
+});
+chrome.tabGroups.onRemoved.addListener(async (g) => {
+  if (isBusy()) return;
+  const { groupNames = {} } = await chrome.storage.local.get("groupNames");
+  const known = groupNames[g.id];
+  if (!known || !known.title || Date.now() - known.at > 15 * 60e3) return;   // only "dissolved right after tidy"
+  await addRule({ kind: "nogroup", site: "", group: known.title, text: `Do not make a group called "${known.title}"; leave those tabs loose.` });
+});
+
+async function rulesBlock() {
+  const rules = await loadRules();
+  if (!rules.length) return "";
+  return `\n\nPreferences this person has shown (follow them):\n` + rules.map((r) => `- ${r.text}`).join("\n");
+}
+
+// ---- Undo --------------------------------------------------------------------------------------
+// Before a tidy touches anything, remember each in-scope tab's group (and each group's title/color).
+// Undo puts every tab back: loose tabs become loose, grouped tabs rejoin a group with the same title.
+
+async function snapshotForUndo(tabs, groups, dupesClosed = 0) {
+  const snap = {
+    at: Date.now(),
+    dupesClosed,
+    tabs: tabs.map((t) => ({ id: t.id, groupId: t.groupId, index: t.index })),
+    groups: groups.map((g) => ({ id: g.id, title: g.title || "", color: g.color, collapsed: g.collapsed })),
+  };
+  await chrome.storage.local.set({ undoSnap: snap });
+}
+
+async function undoTidy() {
+  busySince = Date.now();
+  try { return await undoInner(); } finally { busySince = 0; await chrome.storage.local.remove(["placements", "groupNames"]); }
+}
+async function undoInner() {
+  const { undoSnap } = await chrome.storage.local.get("undoSnap");
+  if (!undoSnap) return { error: "Nothing to undo" };
+  if (Date.now() - undoSnap.at > 6 * 3600e3) return { error: "Last tidy was over 6 hours ago; undo expired" };
+  const win = await focusedWindow();
+  const live = new Map((await chrome.tabs.query({ windowId: win.id })).map((t) => [t.id, t]));
+  const nowGroups = await queryGroups(win.id);
+  const byTitle = new Map(nowGroups.map((g) => [(g.title || "").toLowerCase(), g]));
+
+  let restored = 0, failed = 0;
+  // 1) tabs that were loose → ungroup
+  const wasLoose = undoSnap.tabs.filter((t) => t.groupId === -1 && live.has(t.id) && live.get(t.id).groupId !== -1).map((t) => t.id);
+  if (wasLoose.length) { try { await withTimeout(chrome.tabs.ungroup(wasLoose)); restored += wasLoose.length; } catch { failed += wasLoose.length; } }
+  // 2) tabs that were in a group → back into a group with that title (reuse if it still exists, else recreate)
+  const wasGrouped = undoSnap.tabs.filter((t) => t.groupId !== -1 && live.has(t.id));
+  const byOldGroup = new Map();
+  for (const t of wasGrouped) (byOldGroup.get(t.groupId) || byOldGroup.set(t.groupId, []).get(t.groupId)).push(t.id);
+  for (const [oldId, ids] of byOldGroup) {
+    const meta = undoSnap.groups.find((g) => g.id === oldId) || { title: "", color: "grey" };
+    const stillThere = live.get(ids[0])?.groupId === oldId ? oldId : null;
+    let target = stillThere ?? byTitle.get(meta.title.toLowerCase())?.id ?? null;
+    const need = ids.filter((id) => live.get(id).groupId !== target);
+    if (!need.length) { restored += ids.length; continue; }
+    try {
+      if (target == null) {
+        target = await group({ tabIds: need, createProperties: { windowId: win.id } });
+        await updateGroup(target, { title: meta.title, color: meta.color, collapsed: !!meta.collapsed });
+      } else {
+        await group({ tabIds: need, groupId: target });
+      }
+      restored += ids.length;
+    } catch { failed += need.length; }
+  }
+  await chrome.storage.local.remove("undoSnap");
+  return { undone: true, restored, failed, dupesClosed: undoSnap.dupesClosed || 0 };
 }
 
 async function ungroup() {
+  busySince = Date.now();
+  try { return await ungroupInner(); } finally { busySince = 0; await chrome.storage.local.remove(["placements", "groupNames"]); }
+}
+async function ungroupInner() {
   const win = await focusedWindow();
   const tabs = await inScope(await chrome.tabs.query({ windowId: win.id }));
   const prot = await protectedSet();
@@ -266,6 +575,8 @@ Rules:
 - AI chat tabs (ChatGPT, Claude, Gemini, etc.) go with the project their title is about, if one exists; otherwise "Other".
 - Every tab id appears exactly once.${existingTitles.length ? `
 - These groups already exist; reuse their exact names when a tab fits: ${existingTitles.join(", ")}.` : ""}
+
+${await rulesBlock()}
 
 Return ONLY a JSON object. Keys are group names you invent; values are arrays of the numeric ids from the list below. The shape is like ${example} but with your own group names and all ${n} ids.
 
@@ -375,7 +686,7 @@ async function geminiModels(apiKey) {
 // Chrome's built-in Prompt API (Gemini Nano). Free, local, no key. Only present in browsers that ship it.
 async function onDeviceStatus() {
   if (typeof LanguageModel === "undefined") return { state: "missing" };
-  try { return { state: await LanguageModel.availability() }; }   // "available" | "downloadable" | "downloading" | "unavailable"
+  try { return { state: await LanguageModel.availability({ expectedOutputs: [{ type: "text", languages: ["en"] }] }) }; }   // "available" | "downloadable" | "downloading" | "unavailable"
   catch (e) { return { state: "error", detail: errMsg(e) }; }
 }
 
@@ -387,7 +698,7 @@ async function onDeviceIsReal() {
   const t = Date.now();
   let result;
   try {
-    const session = await withTimeout(LanguageModel.create(), 20_000);
+    const session = await withTimeout(LanguageModel.create({ expectedOutputs: [{ type: "text", languages: ["en"] }] }), 20_000);
     try {
       const reply = String(await withTimeout(session.prompt("Reply with exactly the single word PINEAPPLE and nothing else."), 60_000));
       const ms = Date.now() - t;
@@ -416,10 +727,10 @@ async function askOnDevice(prompt) {
   let session;
   try {
     const p = await LanguageModel.params().catch(() => null);
-    const opts = p ? { temperature: Math.max(p.minTemperature ?? 0, Math.min(0.2, p.maxTemperature ?? 1)), topK: Math.max(p.minTopK ?? 1, Math.min(3, p.maxTopK ?? 3)) } : {};
+    const opts = p ? { expectedOutputs: [{ type: "text", languages: ["en"] }], temperature: Math.max(p.minTemperature ?? 0, Math.min(0.2, p.maxTemperature ?? 1)), topK: Math.max(p.minTopK ?? 1, Math.min(3, p.maxTopK ?? 3)) } : {};
     session = await withTimeout(LanguageModel.create(opts), 20_000);
   } catch (e1) {
-    try { session = await withTimeout(LanguageModel.create(), 20_000); }
+    try { session = await withTimeout(LanguageModel.create({ expectedOutputs: [{ type: "text", languages: ["en"] }] }), 20_000); }
     catch (e2) { throw new Error("Couldn't start built-in model: " + errMsg(e2)); }
   }
   try {
@@ -521,6 +832,9 @@ async function diag() {
   }));
   raw.activeCount = everything.filter((t) => t.active).length;
   raw.highlightedCount = everything.filter((t) => t.highlighted).length;
+  const { evlog = [] } = await chrome.storage.local.get("evlog");
+  const t0 = Date.now();
+  raw.recentEvents = evlog.map((e) => ({ agoSec: Math.round((t0 - e.t) / 1000), ...e, t: undefined }));
 
   let canGroup = null, why = "";
   const refused = [];
@@ -602,6 +916,7 @@ const isProtected = (t, set) => set.has(protectKey(t.url || t.pendingUrl || ""))
 // don't tell extensions which space a tab belongs to, so "recently used" and "selected" are the proxies.
 async function inScope(tabs) {
   const { scope = "window", scopeHours = 2 } = await chrome.storage.sync.get(["scope", "scopeHours"]);
+  if (scope === "space") return currentSpaceTabs(tabs);
   if (scope === "highlighted") {
     const hl = tabs.filter((t) => t.highlighted);
     return hl.length > 1 ? hl : tabs;               // a lone active tab isn't a selection; fall back to everything
@@ -611,6 +926,115 @@ async function inScope(tabs) {
     return tabs.filter((t) => (t.lastAccessed || 0) >= cutoff);
   }
   return tabs;
+}
+
+// ---- Current space (Dia) ---------------------------------------------------------------------
+// Dia shows one space at a time but reports every space's tabs as one window, with no space field.
+// What it does give us: a tab can only become active while its space is showing, and lastAccessed
+// updates when that happens. So we watch activations; a jump to a tab that hadn't been touched in a
+// while means a space switch. "Current space" = tabs used since the most recent such switch.
+// Dia also drops a chrome://assistant/<uuid> tab in each space; when one of those gets activated it's
+// a reliable space-boundary marker too.
+
+const SPACE_GAP_MS = 20_000;           // backup signal: an activated tab idle longer than this means we came from elsewhere
+let spaceEnteredAt = 0;                // when we last believe the current space was entered
+let lastActiveId = 0;                  // the tab that was active before this activation
+const ID_GAP = 12;                     // tab ids within this of each other were created in the same burst (= same space)
+
+// Split web tabs into contiguous id runs; returns a Map tabId -> runIndex.
+function idRuns(tabs) {
+  const sorted = tabs.filter(isWebTab).sort((a, b) => a.id - b.id);
+  const runOf = new Map();
+  let run = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    if (i > 0 && sorted[i].id - sorted[i - 1].id > ID_GAP) run++;
+    runOf.set(sorted[i].id, run);
+  }
+  return runOf;
+}
+
+chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  const now = Date.now();
+  let t = null; try { t = await chrome.tabs.get(tabId); } catch { return; }
+  const url = t.url || t.pendingUrl || "";
+  const isAssistant = /^chrome:\/\/(assistant|start-page)\//.test(url);
+  const isOurs = url.startsWith(chrome.runtime.getURL(""));   // our own settings/welcome pages aren't a space signal
+  let switched = false;
+  if (isAssistant) switched = true;
+  else if (!isOurs && isWebTab(t) && lastActiveId) {
+    // Primary signal: did we land in a different id run than the tab we came from?
+    const all = await chrome.tabs.query({ windowId });
+    const runOf = idRuns(all);
+    const from = runOf.get(lastActiveId), to = runOf.get(tabId);
+    if (from !== undefined && to !== undefined && from !== to) switched = true;
+    // Backup: a tab idle for a while, when nothing else nearby was touched, means we came from elsewhere.
+    if (!switched && now - (t.lastAccessed || 0) > SPACE_GAP_MS) switched = true;
+  }
+  if (switched || !spaceEnteredAt) spaceEnteredAt = now;
+  if (!isOurs && isWebTab(t)) lastActiveId = tabId;
+  try { await chrome.storage.local.set({ spaceEnteredAt, lastActiveId }); } catch {}
+});
+
+// Which id-run (≈ Dia space) is showing right now, judged by the active real tab.
+async function currentRunId(windowId) {
+  try {
+    const all = await chrome.tabs.query({ windowId });
+    const active = all.find((t) => t.active);
+    if (!active || !isWebTab(active) || (active.url || "").startsWith(chrome.runtime.getURL(""))) {
+      const r = idRuns(all).get(lastActiveId); return r === undefined ? null : r;
+    }
+    const r = idRuns(all).get(active.id); return r === undefined ? null : r;
+  } catch { return null; }
+}
+async function waitForRun(windowId, run, ms) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    if ((await currentRunId(windowId)) === run) return true;
+    await sleep(500);
+  }
+  return false;
+}
+
+// On a cold start we have no activation history; take the active real tab as the anchor so a tidy
+// right after install/reload still scopes to the space you're looking at.
+async function seedAnchor() {
+  try {
+    const st = await chrome.storage.local.get(["spaceEnteredAt", "lastActiveId"]);
+    if (!spaceEnteredAt) spaceEnteredAt = st.spaceEnteredAt || 0;
+    if (!lastActiveId) lastActiveId = st.lastActiveId || 0;
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (active && isWebTab(active) && !(active.url || "").startsWith(chrome.runtime.getURL(""))) {
+      if (!lastActiveId) lastActiveId = active.id;
+      if (!spaceEnteredAt) spaceEnteredAt = Date.now();
+    }
+  } catch {}
+}
+seedAnchor();
+chrome.runtime.onStartup.addListener(seedAnchor);
+chrome.runtime.onInstalled.addListener(seedAnchor);
+
+async function currentSpaceTabs(tabs) {
+  await seedAnchor();
+  const web = tabs.filter(isWebTab);
+  if (web.length === 0) return tabs;
+  const runOf = idRuns(tabs);
+
+  // Anchor: the last real tab we were on (not our own pages). Its id run is the current space.
+  // Seeds: tabs touched since we entered this space; they confirm/extend the run set.
+  const since = spaceEnteredAt || Date.now() - 30 * 60e3;
+  const seeds = web.filter((t) => (t.lastAccessed || 0) >= since - 2000);
+  // The anchor run is the space. Seeds only count if they're in the anchor run too — a seed from
+  // another run means we hopped spaces without the hop being detected, and must not widen the scope.
+  let anchorRun = runOf.get(lastActiveId);
+  if (anchorRun === undefined) {
+    const active = web.find((t) => t.active);
+    anchorRun = active ? runOf.get(active.id) : undefined;
+  }
+  if (anchorRun === undefined) {
+    // Genuinely no idea where we are. Do nothing rather than touch other spaces.
+    return tabs.filter((t) => !isWebTab(t));
+  }
+  return tabs.filter((t) => !isWebTab(t) || runOf.get(t.id) === anchorRun);
 }
 
 async function looseTabs(windowId) {
@@ -625,4 +1049,17 @@ const isTimeout = (msg) => (msg || "").includes(TIMEOUT_MSG);
 const withTimeout = (p, ms = 8000) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(TIMEOUT_MSG)), ms))]);
 const group = (opts) => withTimeout(chrome.tabs.group(opts));
 const queryGroups = (windowId) => withTimeout(chrome.tabGroups.query({ windowId }), 5000).catch(() => []);
-const updateGroup = (id, props) => withTimeout(chrome.tabGroups.update(id, props), 5000).catch(() => {});
+let lastUpdateError = "";
+async function updateGroup(id, props) {
+  try { await withTimeout(chrome.tabGroups.update(id, props), 5000); }
+  catch (e) { lastUpdateError = errMsg(e); return; }
+  // Some browsers apply the title but drop the color on a fresh group; re-assert it after a beat.
+  if (props.color) {
+    setTimeout(async () => {
+      try {
+        const g = await withTimeout(chrome.tabGroups.get(id), 3000);
+        if (g && g.color !== props.color) await withTimeout(chrome.tabGroups.update(id, { color: props.color }), 3000);
+      } catch {}
+    }, 400);
+  }
+}
