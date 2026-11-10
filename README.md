@@ -1,4 +1,4 @@
-# 🧹 Tidy Tabs: AI Tab Organizer & Group Manager
+# 🧹 Tidy Tabs: AI Tab Organizer & Auto Tab Groups
 
 One-click AI tab grouping, in the spirit of Arc's Tidy Tabs. Click the broom, and your loose tabs get sorted into named groups like "LEGO", "Japan trip", "CS50", the way you'd organize them by hand.
 

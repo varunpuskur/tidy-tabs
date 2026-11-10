@@ -33,6 +33,13 @@ const json = (body, status = 200) =>
 const today = () => new Date().toISOString().slice(0, 10);
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+async function scramble(secret, text) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(text)));
+  return [...sig.slice(0, 12)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function bump(kv, key, ttl) {
   const n = parseInt((await kv.get(key)) || "0", 10) + 1;
   await kv.put(key, String(n), ttl ? { expirationTtl: ttl } : undefined);
@@ -76,8 +83,10 @@ async function tidy(req, env) {
   const used = await count(env.TRIAL, "u:" + id);
   if (used >= LIMIT) return json({ error: "trial_used", remaining: 0 }, 402);
 
-  const ip = req.headers.get("cf-connecting-ip") || "unknown";
+  // The per-network limit never stores an IP address: only a one-way scramble of it (keyed with a secret and
+  // the date, so it can't be reversed or linked across days). It exists to stop one network farming free tidies.
   const day = today();
+  const ip = await scramble(env.GEMINI_KEY || "k", day + "|" + (req.headers.get("cf-connecting-ip") || "unknown"));
   if ((await count(env.TRIAL, `ip:${day}:${ip}`)) >= IP_PER_DAY) return json({ error: "ip_limit", remaining: LIMIT - used, message: "Too many free tidies from this network today. Add your own free key in Settings to keep going." }, 429);
   if ((await count(env.TRIAL, `g:${day}`)) >= GLOBAL_PER_DAY) return json({ error: "busy", remaining: LIMIT - used, message: "The free trial is at capacity today. Add your own free key in Settings to keep going." }, 503);
 
@@ -118,16 +127,22 @@ async function models(key) {
 // Returns { text } on success, or { text: "", quota: true } when the models said "out of quota" (free tier daily limit).
 // The whole thing must finish within about 20 seconds: the browser kills an extension's background worker when a
 // request takes more than 30 seconds to answer, which would leave the person staring at a spinner.
+// Request settings, most helpful first. Not every model takes all of them (3.5 Flash-Lite rejects the first set),
+// so on a 400 we step down and remember what each model accepted, instead of paying for a rejected request each time.
+const CONFIGS = [
+  { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } },
+  { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 4096 },
+  { temperature: 0, maxOutputTokens: 4096 },
+];
+const cfgLevel = new Map();
 async function askGemini(prompt, key) {
   const deadline = Date.now() + 20_000;
   let quotaHits = 0, tried = 0;
   for (const model of await models(key)) {
-    for (const minimal of [false, true]) {
+    for (let level = cfgLevel.get(model) ?? 0; level < CONFIGS.length; level++) {
       const left = deadline - Date.now();
       if (left < 2000) return { text: "", quota: tried > 0 && quotaHits >= tried };
-      const generationConfig = minimal
-        ? { temperature: 0, maxOutputTokens: 4096 }
-        : { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } };
+      const generationConfig = CONFIGS[level];
       let r;
       try {
         r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
@@ -140,10 +155,10 @@ async function askGemini(prompt, key) {
       if (r.ok) {
         const j = await r.json();
         const text = j.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
-        if (text) return { text };
+        if (text) { cfgLevel.set(model, level); return { text }; }
         tried++; break;
       }
-      if (r.status === 400 && !minimal) continue;   // some models reject the optional settings
+      if (r.status === 400 && level < CONFIGS.length - 1) continue;   // some models reject the optional settings
       tried++;
       if (r.status === 429) quotaHits++;
       break;                                         // 404 / 429 / 5xx: next model

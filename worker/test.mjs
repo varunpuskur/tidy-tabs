@@ -39,6 +39,10 @@ assert.equal((await (await get("/status?id=" + id2)).json()).remaining, 10);
 // 400 retry without optional config, 404 falls to next model
 geminiMode = "400first"; calls = [];
 assert.equal((await post({ id: id2, prompt: P })).status, 200); assert.equal(calls.length, 2);
+assert.ok(calls[1].body.generationConfig.responseMimeType && !calls[1].body.generationConfig.thinkingConfig, "second try keeps JSON mode, drops only the thinking setting");
+// ...and it remembers: the next tidy goes straight to the settings that worked (one request, not two)
+calls = [];
+assert.equal((await post({ id: id2, prompt: P })).status, 200); assert.equal(calls.length, 1);
 geminiMode = "404first"; calls = [];
 assert.equal((await post({ id: id2, prompt: P })).status, 200);
 assert.ok(calls[0].url.includes("gemini-9.9-flash-lite"), "newest listed lite model is tried first");   // discovered, not hard-coded
@@ -60,6 +64,9 @@ const realPut = KV.put; KV.put = async (k, v) => { if (k.startsWith("g:")) throw
 const kr = await post({ id: "123e4567-e89b-12d3-a456-426614174009", prompt: P }, "7.7.7.7");
 assert.equal(kr.status, 200);
 KV.put = realPut;
+// no raw IP address is ever written to storage
+assert.ok(![...store.keys()].some((k) => /\d+\.\d+\.\d+\.\d+/.test(k)), "raw IP found in a storage key: " + [...store.keys()].find((k) => /\d+\.\d+\.\d+\.\d+/.test(k)));
+assert.ok([...store.keys()].some((k) => /^ip:\d{4}-\d\d-\d\d:[0-9a-f]{24}$/.test(k)));
 // CORS preflight
 const pre = await worker.fetch(new Request("https://w/tidy", { method: "OPTIONS" }), env);
 assert.equal(pre.status, 204); assert.equal(pre.headers.get("access-control-allow-origin"), "*");

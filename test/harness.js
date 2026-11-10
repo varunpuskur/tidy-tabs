@@ -3,7 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 
-function makeBrowser({ dia = false, ua = "Mozilla/5.0 Chrome/154.0.0.0 Safari/537.36", fetchImpl, transformSource, realTimers = false } = {}) {
+function makeBrowser({ dia = false, ua = "Mozilla/5.0 Chrome/154.0.0.0 Safari/537.36", fetchImpl, transformSource, realTimers = false, AbortControllerImpl = AbortController } = {}) {
   const listeners = {};
   const on = (name) => ({ addListener: (fn) => (listeners[name] ||= []).push(fn) });
   const fire = async (name, ...args) => { for (const fn of listeners[name] || []) await fn(...args); };
@@ -78,12 +78,12 @@ function makeBrowser({ dia = false, ua = "Mozilla/5.0 Chrome/154.0.0.0 Safari/53
   let src = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
   src = src.replace(/^const TRIAL_URL = ".*";/m, 'const TRIAL_URL = "https://tidy-tabs.test.workers.dev";');   // whatever URL is configured
   if (transformSource) src = transformSource(src);
-  src += "\n;globalThis.__t = { runWithFeedback, cleanTitle, compactUrl, groupName, tidy, applyPreview, undoTidy, parsePlan, byDomain, idRuns, inScope, isDia, currentSpaceTabs, pickMode, trialLeft, installId, shareUrl, scheduleAuto, setLastActive: (id) => { lastActiveId = id; } };";
+  src += "\n;globalThis.__t = { diag, runWithFeedback, cleanTitle, compactUrl, groupName, tidy, applyPreview, undoTidy, parsePlan, byDomain, idRuns, inScope, isDia, currentSpaceTabs, pickMode, trialLeft, installId, shareUrl, scheduleAuto, setLastActive: (id) => { lastActiveId = id; } };";
   const timers = [];
   const ctx = {
     chrome, console: { log() {}, warn() {}, error: console.error },
     navigator: { userAgent: ua, userAgentData: { brands: [] } },
-    fetch: (...a) => fetchImpl(...a), AbortController, URL, Response, structuredClone,
+    fetch: (...a) => fetchImpl(...a), AbortController: AbortControllerImpl, URL, Response, structuredClone,
     crypto: require("crypto").webcrypto,
     setTimeout: (fn, ms) => { const h = setTimeout(fn, realTimers ? ms : Math.min(ms, 5)); timers.push(h); return h; },
     clearTimeout, Promise, Date, JSON, Math, Map, Set, Object, Array, Number, String, Error,

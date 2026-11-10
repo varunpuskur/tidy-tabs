@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Tidy Tabs: AI Tab Organizer & Group Manager",
+  "name": "Tidy Tabs: AI Tab Organizer & Auto Tab Groups",
   "version": "1.9.0",
-  "description": "One click sorts your tabs into named groups by topic. Try it free with no setup or account. Works in Chrome, Dia, Brave & Edge.",
+  "description": "AI tab organizer: one shortcut sorts your tabs into named tab groups by topic. Free to try, no account. Chrome, Dia, Brave & Edge.",
   "permissions": [
     "tabs",
     "tabGroups",

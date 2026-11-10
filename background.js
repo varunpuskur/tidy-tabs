@@ -746,7 +746,7 @@ What makes a group
 - A group needs at least 2 tabs.
 
 What goes in "Other"
-- Everyday tools the person keeps open rather than works on: email inbox, calendar, chat and messaging, a drive or files home, music, bank and account dashboards, a site's home page or feed, an overview list of all issues or documents. Only put one in a group when its title clearly names that group's subject.
+- Everyday tools the person keeps open rather than works on: an email inbox, a calendar, a chat or messaging app, a drive or files home, a music player. Only put one in a group when its title clearly names that group's subject.
 - One-off pages that relate to nothing else here. Never stretch a group to fit a stray, and never invent a group just to empty Other.
 - AI chat tabs (ChatGPT, Claude, Gemini) go with the group their title is about, otherwise Other.
 
@@ -871,41 +871,55 @@ function fetchWithTimeout(url, opts, ms = 15_000) {
 
 // Gemini free tier: Flash-Lite models allow ~500 requests/day, full Flash only ~20, and both get
 // "high demand" bursts. Ask which models the key can use, prefer the lite ones, retry sensibly.
+// Request settings, most helpful first. Not every model takes all of them (3.5 Flash-Lite rejects the first set
+// with a 400), so on a 400 we step down, and remember which set each model accepted. Without the memory every
+// tidy made a rejected request first: slower, and twice the use of a free key's per-minute limit.
+const GEMINI_CONFIGS = [
+  { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } },
+  { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 4096 },
+  { temperature: 0, maxOutputTokens: 4096 },
+];
+
 async function askGemini(prompt, apiKey) {
   const models = await geminiModels(apiKey);
   const overloaded = (status, msg) => status === 503 || /high demand|overloaded|try again later/i.test(msg || "");
   const log = [`candidates: ${models.join(", ")}`];
+  const { geminiCfg = {} } = await chrome.storage.local.get("geminiCfg");
   for (const model of models) {
-    let minimal = false;   // after a 400, resend without the optional settings some models reject
+    let level = Math.min(geminiCfg[model] ?? 0, GEMINI_CONFIGS.length - 1);
     for (let attempt = 0; attempt < 3; attempt++) {
       const t0 = Date.now();
-      const generationConfig = minimal
-        ? { temperature: 0, maxOutputTokens: 4096 }
-        : { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } };
       let r;
       try {
         r = await fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
           method: "POST",
           headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig }),
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: GEMINI_CONFIGS[level] }),
         });
       } catch (e) { log.push(`${model}#${attempt + 1} ${Date.now() - t0}ms: ${e.message}`); continue; }
       const j = await r.json();
       if (r.ok) {
         const text = j.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
         if (!text) throw new Error("Gemini: " + (j.candidates?.[0]?.finishReason || "empty reply"));
+        if (geminiCfg[model] !== level) { geminiCfg[model] = level; await chrome.storage.local.set({ geminiCfg }); }
         lastModel = model;
         return text;
       }
       const msg = j.error?.message || r.statusText;
-      log.push(`${model}#${attempt + 1}${minimal ? " (minimal)" : ""} ${Date.now() - t0}ms: HTTP ${r.status} ${msg.slice(0, 80)}`);
-      if (r.status === 400 && !minimal) { minimal = true; continue; }
-      if (r.status === 404 || r.status === 429) break;   // unknown model / daily quota: next model
+      log.push(`${model}#${attempt + 1} (settings ${level + 1}) ${Date.now() - t0}ms: HTTP ${r.status} ${msg.slice(0, 80)}`);
+      // A 400 about the settings: step down and resend. (A bad API key is also a 400; stepping down won't fix that.)
+      if (r.status === 400 && level < GEMINI_CONFIGS.length - 1 && !/api key/i.test(msg)) { level++; attempt--; continue; }
+      if (r.status === 400 || r.status === 401 || r.status === 403 || r.status === 404 || r.status === 429) break;   // key / unknown model / quota: next model
       if (!overloaded(r.status, msg)) break;
       await sleep(2000);
     }
   }
-  throw new Error("Gemini unavailable:\n" + log.join("\n"));
+  // Say what happened in plain words first; the attempt log follows for the Diagnostics panel.
+  const limited = log.some((l) => /HTTP 429/.test(l));
+  throw new Error((limited
+    ? "Gemini's free limit was reached. A free key allows only so many tidies per minute and per day. Wait a minute and try again."
+    : log.some((l) => /api key/i.test(l)) ? "Gemini rejected the API key. Check it in Settings (copy it again from aistudio.google.com/apikey)."
+    : "Gemini didn't answer. Try again in a moment.") + "\n" + log.join("\n"));
 }
 
 // Which models can this key use? Lite first, stable before preview, newest first. Cached for an hour.
@@ -1093,8 +1107,15 @@ async function diag() {
     for (const pair of pairs) {
       const ids = pair.map((t) => t.id);
       try {
-        await group({ tabIds: ids, createProperties: { windowId: win.id } });
+        const testGroup = await group({ tabIds: ids, createProperties: { windowId: win.id } });
         canGroup = true;
+        // Does this browser keep the colour we give a group? (Dia has been seen to show every group the same.)
+        try {
+          await withTimeout(chrome.tabGroups.update(testGroup, { title: "Tidy Tabs test", color: "pink" }), 4000);
+          await sleep(300);
+          const got = await withTimeout(chrome.tabGroups.get(testGroup), 3000);
+          raw.colorTest = { asked: "pink", got: got?.color ?? null, title: got?.title ?? null };
+        } catch (e) { raw.colorTest = { asked: "pink", error: errMsg(e) }; }
         try { await withTimeout(chrome.tabs.ungroup(ids)); } catch {}
         for (const t of pair) { try { await withTimeout(chrome.tabs.move(t.id, { index: t.index })); } catch {} }
         break;
@@ -1118,6 +1139,12 @@ async function diag() {
     lines.push(`⚠️ Every tab I tried was refused by the browser (${[...new Set(refused)].join(", ")}). Grouping stays on; those tabs will be skipped. Reason given: ${why}`);
   } else {
     lines.push("⚠️ Couldn't test grouping: " + why);
+  }
+  if (raw.colorTest) {
+    const c = raw.colorTest;
+    if (c.error) lines.push(`⚠️ This browser refused to set a group's name and colour (${c.error}). Groups are still made, but may be unnamed or all one colour.`);
+    else if (c.got === c.asked) lines.push("✅ Group colours are accepted here. If groups still all look the same colour, this browser stores the colour but doesn't draw it; that's the browser's display, not something an extension can change.");
+    else lines.push(`⚠️ This browser ignores group colours (asked for ${c.asked}, it kept ${c.got || "none"}). Groups are still made and named, they just won't be colour-coded here.`);
   }
   const od = await onDeviceStatus();
   if (od.state === "available") { const p = await onDeviceIsReal(); od.real = p.real; od.probeMs = p.ms; }

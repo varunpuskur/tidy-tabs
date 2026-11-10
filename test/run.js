@@ -375,6 +375,57 @@ test("a failed or empty toolbar click explains itself in the icon's hover text",
   assert.match(b.state.title, /needs at least 2/);
 });
 
+test("own key hitting Gemini's rate limit gets a plain-language message", async () => {
+  const b = makeBrowser({ fetchImpl: async (url) => url.includes("/models?") ? new Response('{"models":[]}') : new Response(JSON.stringify({ error: { message: "Quota exceeded for metric" } }), { status: 429 }) });
+  b.state.tabs = chromeTabs();
+  await b.chrome.storage.sync.set({ provider: "gemini", apiKey: "k" });
+  const r = await b.t.runWithFeedback(b.t.tidy);
+  assert.match(r.error, /^Gemini's free limit was reached/);
+  assert.match(b.state.title, /Wait a minute and try again/);
+  assert.equal(b.state.groups.size, 0);
+});
+
+test("diagnostics report whether the browser keeps group colours, and leave tabs as they were", async () => {
+  const b = makeBrowser({ fetchImpl: server().impl });
+  b.state.tabs = chromeTabs();
+  let d = await b.t.diag();
+  assert.match(d.summary, /Group colours are accepted here/);
+  assert.equal(b.state.tabs.filter((t) => t.groupId !== -1).length, 0);
+  // a browser that silently drops the colour (what Dia may be doing)
+  const realUpdate = b.chrome.tabGroups.update;
+  b.chrome.tabGroups.update = async (id, props) => realUpdate(id, { ...props, color: "grey" });
+  d = await b.t.diag();
+  assert.match(d.summary, /ignores group colours \(asked for pink, it kept grey\)/);
+});
+
+test("Gemini settings a model rejects are dropped once and remembered, so later tidies make one request", async () => {
+  const calls = [];
+  const impl = async (url, opts) => {
+    if (url.includes("/models?")) return new Response('{"models":[]}');
+    const body = JSON.parse(opts.body); calls.push(body.generationConfig);
+    if (body.generationConfig.thinkingConfig) return new Response(JSON.stringify({ error: { message: "Thinking is not supported for this model" } }), { status: 400 });
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: fakeModel(body.contents[0].parts[0].text) }] } }] }));
+  };
+  const b = makeBrowser({ fetchImpl: impl });
+  b.state.tabs = chromeTabs();
+  await b.chrome.storage.sync.set({ provider: "gemini", apiKey: "k" });
+  assert.equal((await b.t.tidy()).groups, 3);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].responseMimeType && !calls[1].thinkingConfig);
+  b.state.tabs.push(tab(980, "https://c.com/1", "Chess openings"), tab(981, "https://c.com/2", "Chess endgames"));
+  calls.length = 0;
+  await b.t.tidy();
+  assert.equal(calls.length, 1);
+});
+
+test("a wrong API key is reported as a key problem, not as Gemini being down", async () => {
+  const b = makeBrowser({ fetchImpl: async (url) => url.includes("/models?") ? new Response('{"models":[]}') : new Response(JSON.stringify({ error: { message: "API key not valid. Please pass a valid API key." } }), { status: 400 }) });
+  b.state.tabs = chromeTabs();
+  await b.chrome.storage.sync.set({ provider: "gemini", apiKey: "bad" });
+  const r = await b.t.runWithFeedback(b.t.tidy);
+  assert.match(r.error, /^Gemini rejected the API key/);
+});
+
 test("auto-tidy never spends free trial tidies", async () => {
   const s = server();
   const b = makeBrowser({ fetchImpl: s.impl });
