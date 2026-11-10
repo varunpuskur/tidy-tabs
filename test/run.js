@@ -3,10 +3,11 @@ const assert = require("assert/strict");
 const { makeBrowser, tab } = require("./harness");
 
 // A stand-in model: groups tabs by the first word of the title ("LEGO ...", "Japan ...").
+// It reads the tab list the way a real model would: numbered rows after the "The tabs (...)" line.
+const tabRows = (prompt) => prompt.split(/\nThe tabs \([^)]*\):\n/)[1].trim().split("\n").map((l) => l.split("\t"));
 function fakeModel(prompt) {
-  const rows = prompt.split("id\ttitle\turl\n")[1].trim().split("\n").map((l) => l.split("\t"));
   const plan = {};
-  for (const [id, title] of rows) (plan[title.split(" ")[0]] ||= []).push(Number(id));
+  for (const [num, title] of tabRows(prompt)) (plan[title.split(" ")[0]] ||= []).push(Number(num));
   return JSON.stringify(plan);
 }
 function server({ trialStatus = 200, remaining = 4 } = {}) {
@@ -98,7 +99,7 @@ test("trial server busy: clear error, nothing grouped, trial not marked used", a
   const r = await b.t.tidy().catch((e) => ({ error: e.message }));
   assert.match(r.error, /busy/);
   assert.equal(b.state.groups.size, 0);
-  assert.equal(await b.t.trialLeft(), 5);
+  assert.equal(await b.t.trialLeft(), 10);
 });
 
 test("own Gemini key bypasses the trial", async () => {
@@ -242,6 +243,136 @@ test("parsePlan: fences, unknown ids, strings, duplicates", async () => {
   assert.equal(JSON.stringify(p), JSON.stringify({ A: [1, 2], B: [3] }));
   assert.throws(() => b.t.parsePlan("sorry I can't", new Set([1])));
   assert.throws(() => b.t.parsePlan('{"A":[42]}', new Set([1])));
+});
+
+test("parsePlan: repeated keys are merged, not dropped; names differing only by case become one group", async () => {
+  const b = makeBrowser({ fetchImpl: server().impl });
+  const ids = new Set([1, 2, 3, 4, 5, 6]);
+  const p = b.t.parsePlan('{"LEGO":[1,2],"Japan":[3],"LEGO":[4],"lego":[5],"Japan":[6],}', ids);
+  assert.equal(JSON.stringify(p), JSON.stringify({ LEGO: [1, 2, 4, 5], Japan: [3, 6] }));
+});
+
+test("parsePlan: apostrophes in names, list-of-objects shape, and 'Misc' folded into Other", async () => {
+  const b = makeBrowser({ fetchImpl: server().impl });
+  const ids = new Set([1, 2, 3, 4]);
+  assert.equal(JSON.stringify(b.t.parsePlan(`{"Mom's birthday":[1,2],"Miscellaneous":[3],"  **CS50**: ":[4]}`, ids)), JSON.stringify({ "Mom's birthday": [1, 2], Other: [3], CS50: [4] }));
+  assert.equal(JSON.stringify(b.t.parsePlan('{"groups":[{"name":"Trip","tabs":[1,2]},{"title":"Work","ids":["3",4]}]}', ids)), JSON.stringify({ Trip: [1, 2], Work: [3, 4] }));
+  assert.equal(JSON.stringify(b.t.parsePlan('Here you go:\n[{"name":"Trip","tab_ids":[1,2]}]', ids)), JSON.stringify({ Trip: [1, 2] }));
+});
+
+test("titles and URLs are cleaned before they reach the model", async () => {
+  const b = makeBrowser({ fetchImpl: server().impl });
+  assert.equal(b.t.cleanTitle("(12) Inbox   -  Gmail"), "Inbox - Gmail");
+  assert.equal(b.t.cleanTitle("● notes.md"), "notes.md");
+  assert.equal(b.t.compactUrl("https://www.amazon.com/dp/B0C1/?tag=abc&ref=xyz#reviews"), "amazon.com/dp/B0C1");
+  assert.equal(b.t.compactUrl("not a url"), "not a url");
+});
+
+test("existing groups are described to the model with sample tabs, and only groups in scope are offered", async () => {
+  const s = server();
+  const b = makeBrowser({ fetchImpl: s.impl });
+  b.state.tabs = chromeTabs();
+  await b.chrome.storage.sync.set({ provider: "gemini", apiKey: "k" });
+  await b.t.tidy();
+  b.state.tabs.push(tab(950, "https://lego.com/z", "LEGO minifig"), tab(951, "https://lego.com/y", "LEGO castle"));
+  s.calls.length = 0;
+  await b.t.tidy();
+  const prompt = JSON.parse(JSON.stringify(s.calls.find((c) => c.url.includes("generateContent")).body)).contents[0].parts[0].text;
+  assert.match(prompt, /"LEGO": LEGO Speed Champions; LEGO light kit/);
+  assert.equal([...b.state.groups.values()].filter((g) => g.title === "LEGO").length, 1);   // joined, no second LEGO group
+});
+
+test("a 400-tab window sends only the 150 most recent tabs and says so", async () => {
+  const s = server();
+  const b = makeBrowser({ fetchImpl: s.impl });
+  b.state.tabs = [...Array(400)].map((_, i) => tab(5000 + i, "https://site" + (i % 40) + ".com/p" + i, "Topic" + (i % 40) + " page " + i, { lastAccessed: Date.now() - i * 1000 }));
+  const r = await b.t.tidy();
+  const prompt = s.calls.find((c) => c.url.endsWith("/tidy")).body.prompt;
+  assert.equal(tabRows(prompt).length, 150);
+  assert.ok(prompt.length < 40000, "prompt too big for the trial server: " + prompt.length);
+  assert.match(r.note, /150 most recent tabs; tidy again for the other 250/);
+  assert.ok(b.state.tabs.filter((t) => t.id >= 5150).every((t) => t.groupId === -1));
+});
+
+test("Chrome: clicking another tab while it sorts does not stall or cancel the tidy", async () => {
+  const s = server();
+  let b;
+  const slow = async (url, opts) => {     // the person clicks a far-away tab while the model is thinking
+    if (url.endsWith("/tidy")) { b.state.tabs.forEach((t) => (t.active = t.id === 3)); await b.fire("tabs.onActivated", { tabId: 3, windowId: 1 }); }
+    return s.impl(url, opts);
+  };
+  b = makeBrowser({ fetchImpl: slow });
+  b.state.tabs = chromeTabs();
+  await b.chrome.storage.sync.set({ scope: "space" });   // the default written at install
+  const t0 = Date.now();
+  const r = await b.t.tidy();
+  assert.equal(r.groups, 3, JSON.stringify(r));
+  assert.ok(!/switched spaces/.test(r.note || ""));
+  assert.ok(Date.now() - t0 < 2000);
+});
+
+test("a failed tidy does not wipe the previous undo", async () => {
+  const b = makeBrowser({ fetchImpl: server().impl });
+  b.state.tabs = chromeTabs();
+  await b.t.tidy();
+  b.state.tabs.push(tab(960, "https://a.com/1", "Zed one"), tab(961, "https://a.com/2", "Zed two"));
+  b.ctx.fetch = server({ trialStatus: 502 }).impl;
+  await b.t.tidy().catch(() => {});
+  const u = await b.t.undoTidy();
+  assert.equal(u.error, undefined);
+  assert.equal(b.state.tabs.filter((t) => t.groupId !== -1).length, 0);
+});
+
+test("new groups get colours that aren't already on screen", async () => {
+  const b = makeBrowser({ fetchImpl: server().impl });
+  b.state.tabs = chromeTabs();
+  await b.chrome.storage.sync.set({ provider: "gemini", apiKey: "k" });
+  await b.t.tidy();
+  b.state.tabs.push(tab(970, "https://c.com/1", "Chess openings"), tab(971, "https://c.com/2", "Chess endgames"));
+  await b.t.tidy();
+  const colors = [...b.state.groups.values()].map((g) => g.color);
+  assert.equal(new Set(colors).size, colors.length, colors.join(","));
+});
+
+test("long tab ids never reach the model; it sees 1..N and its answer maps back", async () => {
+  const s = server();
+  const b = makeBrowser({ fetchImpl: s.impl });
+  b.state.tabs = chromeTabs().map((t, i) => ({ ...t, id: 1294830000 + i * 37 }));
+  const r = await b.t.tidy();
+  const prompt = s.calls.find((c) => c.url.endsWith("/tidy")).body.prompt;
+  assert.ok(!/12948\d{5}/.test(prompt));
+  assert.deepEqual(tabRows(prompt).map((row) => Number(row[0])), [1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(r.groups, 3);
+});
+
+test("a cut-off answer keeps the groups it finished and drops the half-written number", async () => {
+  const b = makeBrowser({ fetchImpl: server().impl });
+  const p = b.t.parsePlan('{"Trip": [1, 2, 3], "Work": [4, 5, 1', new Set([1, 2, 3, 4, 5, 6, 10, 11, 12]));
+  assert.equal(JSON.stringify(p), JSON.stringify({ Trip: [1, 2, 3], Work: [4, 5] }));
+  const q = b.t.parsePlan('{"groups":["A","B"],"tabs":{"1":"A","2":"B","3":"A"}}', new Set([1, 2, 3]));
+  assert.equal(JSON.stringify(q), JSON.stringify({ A: [1, 3], B: [2] }));
+});
+
+test("by-website names handle two-part country domains", async () => {
+  const b = makeBrowser({ fetchImpl: server().impl });
+  const p = b.t.byDomain([{ id: 1, url: "https://www.bbc.co.uk/news" }, { id: 2, url: "https://docs.google.com/x" }, { id: 3, url: "https://localhost:3000/" }]);
+  assert.equal(JSON.stringify(Object.keys(p)), JSON.stringify(["Bbc", "Google", "Localhost"]));
+});
+
+test("a failed or empty toolbar click explains itself in the icon's hover text", async () => {
+  const b = makeBrowser({ fetchImpl: server({ trialStatus: 502 }).impl });
+  b.state.tabs = chromeTabs();
+  await b.t.runWithFeedback(b.t.tidy);
+  assert.equal(b.state.badge, "!");
+  assert.match(b.state.title, /busy/);
+  b.ctx.fetch = server().impl;
+  await b.t.runWithFeedback(b.t.tidy);
+  assert.equal(b.state.badge, "✓");
+  assert.match(b.state.title, /right-click for Settings/);
+  b.state.tabs = [tab(1, "https://a.com", "Only one")];
+  await b.t.runWithFeedback(b.t.tidy);
+  assert.equal(b.state.badge, "0");
+  assert.match(b.state.title, /needs at least 2/);
 });
 
 test("auto-tidy never spends free trial tidies", async () => {

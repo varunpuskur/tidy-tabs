@@ -19,9 +19,13 @@ Tidy Tabs is a tab organizer and tab manager that groups your open tabs by topic
 
 ## What's new in 1.9
 
-- **Works on the first click.** New installs get 5 free tidies through a small server that holds the Gemini key, so there's nothing to set up. After that it asks for your own free key. It never silently falls back to grouping by website.
+- **Works on the first click.** New installs get 10 free tidies through a small server that holds the Gemini key, so there's nothing to set up. After that it asks for your own free key. It never silently falls back to grouping by website.
 - **Fixed "no tabs found" in Chrome.** Chrome 150+ ships the same built-in AI API Dia does, so it was being treated as Dia and scoped to one or two tabs. Dia is now detected by its assistant tabs, and every other browser tidies the whole window.
 - **Better Dia spaces.** A tab opened in a space (Cmd+T, or from a link) counts as part of that space immediately.
+- **Much more accurate grouping.** The prompt was rebuilt around "one group per thing you're in the middle of" instead of a target number of groups, which used to cut one task in two and, on big windows, leave most tabs ungrouped. Tabs are sent to the model numbered 1 to N instead of by ten-digit tab id (models mistype long ids, which lost tabs or failed the tidy). Existing groups are described with sample tabs so new tabs join them. The answer parser understands three shapes, merges repeated names and salvages cut-off answers. See *Benchmark* below.
+- **Fixed in Chrome:** clicking another tab while it was sorting made the tidy wait 20 seconds and give up ("you switched spaces"). That logic now only runs in Dia.
+- A click that fails or finds nothing to group now says why in the icon's hover text.
+- **Welcome page leads with the shortcut**, so the first tidy teaches it.
 - **One-button welcome page**, a **What's new** page on feature updates, a **share link**, and a one-question **uninstall survey**.
 - Fixes: a tab listed in two groups by the model is no longer grouped twice; a site you've pulled out of groups twice is now protected on every page, not just its homepage; the diagnostic event log no longer writes to storage on every tab event.
 
@@ -62,7 +66,7 @@ The grouping uses a small language model. Nothing goes through any server of min
 | OpenAI | gpt-4o-mini | ~$0.0003 per tidy | [platform.openai.com](https://platform.openai.com, $5 minimum credit. |
 | None | n/a | Free | "By domain" mode groups by website instead of topic. Works, but it's not the point. |
 
-The first 5 tidies need no key: they go through a small server of mine that forwards titles and URLs to Gemini and stores none of them (see PRIVACY.md). After that, with your own key, each tidy sends tab **titles and URLs** straight to the provider you chose: not page contents, not history, not anything else. Keys are stored in your browser's extension storage and never leave it except to call that provider.
+The first 10 tidies need no key: they go through a small server of mine that forwards titles and URLs to Gemini and stores none of them (see PRIVACY.md). After that, with your own key, each tidy sends tab **titles and URLs** straight to the provider you chose: not page contents, not history, not anything else. Keys are stored in your browser's extension storage and never leave it except to call that provider.
 
 ## FAQ
 
@@ -83,6 +87,27 @@ Only duplicates, only if you turn that option on, and never the active tab. Grou
 
 **Where do my settings live?**
 In your browser's synced extension storage, so they follow you between profiles on the same account. The rules it learns from your corrections live there too (see *What it's learned* in Settings to review or delete them). Sessions and the undo snapshot are local only. Deleting the extension deletes all of it.
+
+## Benchmark
+
+`test/bench-data.js` has 14 hand-labeled tab sets (410 tabs: student, developer, researcher, shopping, non-English, vague titles, an all-unrelated window, a re-tidy with existing groups, and a 148-tab window). `test/eval.js` runs the real extension code on them in a fake browser with a real model answering, and scores the groups that end up in the tab bar.
+
+```
+GEMINI_KEY=AIza... node test/eval.js            # current code, with Gemini (what users get)
+GEMINI_KEY=AIza... node test/eval.js baseline   # the 1.8.0 grouping code, for comparison
+```
+
+Measured with Claude Haiku standing in for Gemini (3 runs per set):
+
+| | 1.8.0 | 1.9.0 |
+|---|---|---|
+| Tabs that end up where a person would put them | 82.6% | 97.0% |
+| Tabs that belong in a group but were left loose | 11.8% | 1.4% |
+| Strays pushed into a group they don't belong in | 5.3% | 1.1% |
+| Groups reproduced exactly | 62% | 90% |
+| Tidies that failed outright | 1 of 42 | 0 of 42 |
+
+These numbers are for the stand-in model; run the two commands above to get them for Gemini.
 
 ## Development
 

@@ -16,13 +16,12 @@
 //   GET  /bye                            -> uninstall feedback page;  POST /bye records the answer
 //   GET  /stats?key=                     -> counters
 
-const LIMIT = 5;                  // free tidies per install
-const IP_PER_DAY = 20;            // backstop against someone reinstalling or scripting fake ids
+const LIMIT = 10;                 // free tidies per install
+const IP_PER_DAY = 30;            // backstop against someone reinstalling or scripting fake ids
 const GLOBAL_PER_DAY = 2000;      // hard ceiling on what the trial can cost you in a day
-const MAX_PROMPT = 20000;         // characters; a 60-tab prompt is about 9k
+const MAX_PROMPT = 40000;         // characters; the extension keeps prompts under ~30k even for 150 tabs
 const PREFIX = "You are tidying a browser sidebar.";   // only our prompt gets through
 const STORE = "https://chromewebstore.google.com/detail/cadaopjbichjjgljabfkokckndfgnpoa";
-const MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"];
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -96,34 +95,61 @@ async function tidy(req, env) {
   return json({ text, remaining: LIMIT - used - 1 });
 }
 
-// Returns { text } on success, or { text: "", quota: true } when every model said "out of quota" (free tier daily limit).
+// Which Gemini models to try, cheapest and fastest first. Asked from Google and remembered for six hours,
+// because model names get retired (2.5 Flash was) and a hard-coded list would take the trial down with it.
+const FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"];
+let modelCache = { at: 0, list: FALLBACK_MODELS };
+async function models(key) {
+  if (Date.now() - modelCache.at < 6 * 3600e3) return modelCache.list;
+  try {
+    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", { headers: { "x-goog-api-key": key }, signal: AbortSignal.timeout(4000) });
+    const names = ((await r.json()).models || [])
+      .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
+      .map((m) => m.name.replace(/^models\//, ""))
+      .filter((n) => /-flash|-lite/i.test(n) && !/image|audio|tts|live|embedding|vision|thinking|exp/i.test(n));
+    const ver = (n) => parseFloat((n.match(/(\d+(?:\.\d+)?)/) || [0, 0])[1]);
+    const lite = (n) => (/-lite/i.test(n) ? 1 : 0), stable = (n) => (/preview/i.test(n) ? 0 : 1);
+    names.sort((x, y) => lite(y) - lite(x) || stable(y) - stable(x) || ver(y) - ver(x));
+    modelCache = { at: Date.now(), list: [...new Set([...names.slice(0, 3), ...FALLBACK_MODELS])] };
+  } catch { modelCache = { at: Date.now() - 5.5 * 3600e3, list: FALLBACK_MODELS }; }   // try again in half an hour
+  return modelCache.list;
+}
+
+// Returns { text } on success, or { text: "", quota: true } when the models said "out of quota" (free tier daily limit).
+// The whole thing must finish within about 20 seconds: the browser kills an extension's background worker when a
+// request takes more than 30 seconds to answer, which would leave the person staring at a spinner.
 async function askGemini(prompt, key) {
-  let quotaHits = 0;
-  for (const model of MODELS) {
+  const deadline = Date.now() + 20_000;
+  let quotaHits = 0, tried = 0;
+  for (const model of await models(key)) {
     for (const minimal of [false, true]) {
+      const left = deadline - Date.now();
+      if (left < 2000) return { text: "", quota: tried > 0 && quotaHits >= tried };
       const generationConfig = minimal
-        ? { temperature: 0, maxOutputTokens: 2048 }
-        : { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } };
+        ? { temperature: 0, maxOutputTokens: 4096 }
+        : { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } };
       let r;
       try {
         r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
           method: "POST",
           headers: { "content-type": "application/json", "x-goog-api-key": key },
           body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig }),
+          signal: AbortSignal.timeout(Math.min(12_000, left)),
         });
-      } catch { break; }
+      } catch { tried++; break; }
       if (r.ok) {
         const j = await r.json();
         const text = j.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
         if (text) return { text };
-        break;
+        tried++; break;
       }
       if (r.status === 400 && !minimal) continue;   // some models reject the optional settings
+      tried++;
       if (r.status === 429) quotaHits++;
       break;                                         // 404 / 429 / 5xx: next model
     }
   }
-  return { text: "", quota: quotaHits > 0 && quotaHits >= MODELS.length - 1 };
+  return { text: "", quota: tried > 0 && quotaHits >= tried - 1 && quotaHits > 0 };
 }
 
 // ---- uninstall feedback ---------------------------------------------------------------------------

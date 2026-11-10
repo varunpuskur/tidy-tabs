@@ -1,6 +1,6 @@
 # Deploying the free-trial server (about 10 minutes, all in the browser)
 
-The extension's first 5 tidies go through this Worker. It holds your Gemini key as a secret, so the key
+The extension's first 10 tidies go through this Worker. It holds your Gemini key as a secret, so the key
 never ships inside the extension, where anyone could unzip it and read it.
 
 ## 1. A Gemini key just for this
