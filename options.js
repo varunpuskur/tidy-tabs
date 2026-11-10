@@ -12,10 +12,10 @@ $("openWelcome").onclick = (e) => { e.preventDefault(); chrome.runtime.sendMessa
 
 // --- settings -------------------------------------------------------------------------------
 chrome.storage.sync
-  .get(["provider", "apiKey", "keepGroups", "closeDupes", "otherGroup", "granularity", "scope", "scopeHours", "autoTidy", "autoThreshold"])
-  .then(({ provider = "domain", apiKey = "", keepGroups = true, closeDupes = false, otherGroup = false, granularity = "balanced", scope = "window", scopeHours = 2, autoTidy = false, autoThreshold = 8 }) => {
+  .get(["provider", "apiKey", "keepGroups", "closeDupes", "otherGroup", "granularity", "scope", "scopeHours", "autoTidy", "autoThreshold", "previewFirst"])
+  .then(({ provider = "gemini", apiKey = "", keepGroups = true, closeDupes = false, otherGroup = false, granularity = "balanced", scope = "window", scopeHours = 2, autoTidy = false, autoThreshold = 8, previewFirst = false }) => {
     $("provider").value = provider; $("apiKey").value = apiKey;
-    $("keepGroups").checked = keepGroups; $("closeDupes").checked = closeDupes; $("otherGroup").checked = otherGroup; $("granularity").value = granularity; $("scope").value = scope; $("scopeHours").value = scopeHours; scopeRows();
+    $("keepGroups").checked = keepGroups; $("closeDupes").checked = closeDupes; $("otherGroup").checked = otherGroup; $("previewFirst").checked = previewFirst; $("granularity").value = granularity; $("scope").value = scope; $("scopeHours").value = scopeHours; scopeRows();
     $("autoTidy").checked = autoTidy; $("autoThreshold").value = autoThreshold;
   });
 
@@ -31,6 +31,7 @@ async function saveSettings() {
     keepGroups: $("keepGroups").checked,
     closeDupes: $("closeDupes").checked,
     otherGroup: $("otherGroup").checked,
+    previewFirst: $("previewFirst").checked,
     granularity: $("granularity").value,
     scope: $("scope").value,
     scopeHours: Math.max(0.5, parseFloat($("scopeHours").value) || 2),
@@ -41,7 +42,7 @@ async function saveSettings() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => ($("saved").textContent = ""), 1200);
 }
-for (const id of ["provider", "keepGroups", "closeDupes", "otherGroup", "granularity", "scope", "scopeHours", "autoTidy", "autoThreshold"]) {
+for (const id of ["provider", "keepGroups", "closeDupes", "otherGroup", "previewFirst", "granularity", "scope", "scopeHours", "autoTidy", "autoThreshold"]) {
   $(id).addEventListener("change", saveSettings);
 }
 // The key field saves as you type (debounced), so pasting a key is enough.
@@ -67,7 +68,7 @@ async function odRefresh() {
   }
   else if (state === "unavailable") $("odStatus").textContent = "The built-in model isn't available on this device (needs ~4 GB free and a recent machine).";
   else if (odDriving) $("odStatus").textContent = "Downloading… keep this page open.";
-  else { $("odStatus").textContent = state === "downloading" ? "Download is paused or stalled. Click to resume — keep this page open until it finishes." : "The model isn't downloaded yet (one-time, roughly 2 GB). Keep this page open while it downloads."; $("odDownload").hidden = false; }
+  else { $("odStatus").textContent = state === "downloading" ? "Download is paused or stalled. Click to resume, and keep this page open until it finishes." : "The model isn't downloaded yet (one-time, roughly 2 GB). Keep this page open while it downloads."; $("odDownload").hidden = false; }
 }
 $("odDownload").onclick = async () => {
   odDriving = true; $("odDownload").hidden = true; $("odBar").hidden = false; $("odFill").style.width = "0%";
@@ -80,7 +81,7 @@ $("odDownload").onclick = async () => {
           const frac = e.total ? e.loaded / e.total : e.loaded;   // newer API reports a 0–1 fraction in `loaded`
           const pct = Math.max(0, Math.min(100, Math.round(frac * 100)));
           $("odFill").style.width = pct + "%";
-          $("odStatus").textContent = `Downloading… ${pct}% — keep this page open.`;
+          $("odStatus").textContent = `Downloading… ${pct}%. Keep this page open.`;
         });
       },
     });
@@ -169,28 +170,37 @@ $("protClear").onclick = async () => {
 function describe(r) {
   if (!r) return "Nothing yet.";
   const when = new Date(r.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  if (r.error) return `<b>Error</b> at ${when}: ${r.error}`;
+  if (r.error) return `<b>${r.needKey ? "Free tidies used up" : "Error"}</b> at ${when}: ${esc(r.error)}`;
   if (r.ungrouped != null) return `Ungrouped <b>${r.ungrouped}</b> tabs at ${when}.`;
   if (r.saved) return `Saved session <b>${esc(r.name)}</b> at ${when}: ${r.groups} groups, ${r.tabs} tabs.`;
   if (r.restoredSession) return `Restored <b>${esc(r.name)}</b> at ${when}: opened ${r.opened} tabs in ${r.groups} groups${r.alreadyOpen ? ` (${r.alreadyOpen} were already open)` : ""}.`;
-  if (r.undone) return `Undid the last tidy at ${when}: <b>${r.restored}</b> tabs put back${r.failed ? `, ${r.failed} couldn't be` : ""}.${r.dupesClosed ? ` (${r.dupesClosed} duplicate${r.dupesClosed === 1 ? "" : "s"} closed by that tidy stay closed — reopen with ⌘⇧T.)` : ""}`;
+  if (r.undone) return `Undid the last tidy at ${when}: <b>${r.restored}</b> tabs put back${r.failed ? `, ${r.failed} couldn't be` : ""}.${r.dupesClosed ? ` (${r.dupesClosed} duplicate${r.dupesClosed === 1 ? "" : "s"} closed by that tidy stay closed. Reopen with ⌘⇧T.)` : ""}`;
   const sc = { recent: " (recently used only)", highlighted: " (selected only)", space: " (current space only)" }[r.scope] || "";
-  let s = `Made <b>${r.groups}</b> group${r.groups === 1 ? "" : "s"} from ${r.tabs} tabs${sc} at ${when}.`;
+  const how = { domain: "<b>by website, no AI</b>. Add a key under Grouping to sort by topic", gemini: "by topic with <b>Gemini</b>", anthropic: "by topic with <b>Claude</b>", openai: "by topic with <b>OpenAI</b>", ondevice: "by topic with the <b>on-device</b> model", trial: "by topic (free tidy)" }[r.mode];
+  if (r.preview) {
+    const list = (r.previewGroups || []).map((g) => `<li><b>${esc(g.title)}</b> <span class="hint">(${g.tabs.length})</span>: ${g.tabs.map(esc).join(" · ")}</li>`).join("");
+    return `Preview at ${when}${how ? `, grouped ${how}` : ""}. ${r.groups} group${r.groups === 1 ? "" : "s"} from ${r.tabs} tabs${sc}. Nothing has moved yet.<ul style="margin:8px 0 10px 18px;padding:0">${list || "<li>No groups of 2 or more.</li>"}</ul><button class="primary" id="applyPreview">Apply</button> <button id="cancelPreview">Cancel</button>`;
+  }
+  let s = `Made <b>${r.groups}</b> group${r.groups === 1 ? "" : "s"} from ${r.tabs} tabs${sc} at ${when}${how ? `, grouped ${how}` : ""}.`;
   if (r.dupes) s += ` Closed ${r.dupes} duplicate${r.dupes === 1 ? "" : "s"}.`;
   if (r.note) s += ` ${esc(r.note)}`;
   if (r.skipped?.length) s += ` Couldn't group: ${r.skipped.map((x) => x.title).join(", ")}.`;
   return s;
 }
 async function showLast() {
-  const { lastResult } = await chrome.storage.local.get("lastResult");
-  $("last").innerHTML = describe(lastResult);
+  const { lastResult, pendingPlan } = await chrome.storage.local.get(["lastResult", "pendingPlan"]);
+  const r = lastResult?.preview && !pendingPlan ? { ...lastResult, preview: false, groups: 0, note: "Preview was cancelled." } : lastResult;
+  $("last").innerHTML = describe(r);
+  const a = $("applyPreview"), c = $("cancelPreview");
+  if (a) a.onclick = async () => { a.disabled = true; $("last").textContent = "Applying…"; await ask({ type: "applyPreview" }); showLast(); };
+  if (c) c.onclick = async () => { await ask({ type: "cancelPreview" }); showLast(); };
 }
 showLast();
 chrome.storage.onChanged.addListener((c, area) => { if (area === "local" && c.lastResult) showLast(); });
 
 $("tidyNow").onclick = async () => {
   $("tidyNow").disabled = true; $("last").textContent = "Tidying…";
-  const r = await ask({ type: "tidy" });
+  const r = await ask({ type: "tidy", fromOptions: true });
   if (r?.error && !r.at) await chrome.storage.local.set({ lastResult: { at: Date.now(), error: r.error } });
   $("tidyNow").disabled = false; showLast();
 };
@@ -213,3 +223,27 @@ function showDiag(r) {
 }
 $("diag").onclick = async () => { $("diagOut").style.color = ""; $("diagOut").textContent = "Checking…"; showDiag(await ask({ type: "diag" })); };
 $("testai").onclick = async () => { $("diagOut").style.color = ""; $("diagOut").textContent = "Calling the model…"; showDiag(await ask({ type: "testai" })); };
+
+// --- free trial status -----------------------------------------------------------------------
+async function showTrial() {
+  const t = await ask({ type: "trial" });
+  const el = $("trialNote");
+  if (!el || !t?.configured) return;
+  const hasKey = $("apiKey").value.trim() && ["gemini", "anthropic", "openai"].includes($("provider").value);
+  el.hidden = !!hasKey || ["domain", "ondevice"].includes($("provider").value);
+  el.innerHTML = t.left > 0
+    ? `<b>${t.left} of ${t.limit} free tidies left.</b> After that, paste your own free Gemini key here for unlimited tidies.`
+    : `<b>Free tidies used up.</b> Paste a free Gemini key here to keep going: <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>, Create API key, copy, paste.`;
+}
+showTrial();
+$("provider").addEventListener("change", showTrial);
+$("apiKey").addEventListener("input", showTrial);
+chrome.storage.onChanged.addListener((c, area) => { if (area === "local" && c.trialLeft) showTrial(); });
+
+// --- share -------------------------------------------------------------------------------------
+ask({ type: "trial" }).then((t) => { if (t?.shareUrl) $("shareUrl").value = t.shareUrl; });
+$("copyShare").onclick = async () => {
+  try { await navigator.clipboard.writeText($("shareUrl").value); } catch { $("shareUrl").select(); document.execCommand("copy"); }
+  $("copyShare").textContent = "Copied ✓";
+  setTimeout(() => ($("copyShare").textContent = "Copy link"), 1500);
+};

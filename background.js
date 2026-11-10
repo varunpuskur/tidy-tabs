@@ -2,6 +2,7 @@
 // Works in any Chromium browser with native tab groups (Dia, Chrome, Brave, Edge).
 
 const COLORS = ["blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange", "grey"];
+const DEFAULT_TITLE = "Tidy tabs · right-click for Settings";
 
 // =============================================================================================
 // Entry points: icon click, keyboard shortcut, context menu, messages from the settings page
@@ -16,23 +17,43 @@ chrome.commands.onCommand.addListener((cmd) => {
 chrome.runtime.onInstalled.addListener(buildMenus);
 chrome.runtime.onStartup.addListener(buildMenus);
 
-chrome.runtime.onInstalled.addListener(async ({ reason }) => {
-  if (reason !== "install") return;
-  // Dia keeps every space in one window and doesn't say which is which; "recently used" is the safer default there.
-  const { scope } = await chrome.storage.sync.get("scope");
-  if (!scope) await chrome.storage.sync.set({ scope: isDiaLike() ? "space" : "window", scopeHours: 2 });
-  chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") });
-});
-chrome.runtime.onInstalled.addListener(async ({ reason }) => {
-  if (reason !== "update") return;
-  const { scope, scopeMigrated } = await chrome.storage.sync.get(["scope", "scopeMigrated"]);
-  if (!scopeMigrated && isDiaLike() && (scope === "recent" || !scope)) await chrome.storage.sync.set({ scope: "space", scopeMigrated: true });
+chrome.runtime.onInstalled.addListener(async ({ reason, previousVersion }) => {
+  if (reason === "install") {
+    // "Current space" only matters in Dia; everywhere else a window is the unit. Scope is resolved per tidy
+    // (see inScope), so this default is just what the Settings page shows.
+    const { scope } = await chrome.storage.sync.get("scope");
+    if (!scope) await chrome.storage.sync.set({ scope: "space", scopeHours: 2 });
+    await installId();
+    chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") });
+  } else if (reason === "update") {
+    // Tell existing users what changed, but only for feature releases (1.8 -> 1.9), never for 1.9.0 -> 1.9.1.
+    const minor = (v) => (v || "").split(".").slice(0, 2).join(".");
+    const now = chrome.runtime.getManifest().version;
+    if (previousVersion && minor(previousVersion) !== minor(now)) {
+      chrome.tabs.create({ url: chrome.runtime.getURL(`whatsnew.html?from=${encodeURIComponent(previousVersion)}`), active: true });
+    }
+  }
+  setUninstallUrl();
 });
 chrome.runtime.onMessage.addListener((msg) => { if (msg.type === "welcome") chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") }); });
 
-// Dia doesn't put its name in the UA. Its tell: a LanguageModel API on a very recent Chromium, plus chrome://assistant tabs.
-function isDiaLike() {
-  return /\bDia\b/i.test(navigator.userAgent) || (typeof LanguageModel !== "undefined" && /Chrome\/1[5-9]\d/.test(navigator.userAgent));
+// Dia keeps every space in one window and doesn't identify itself in the user agent. Its reliable tell is the
+// chrome://assistant/<uuid> tab it keeps in each space. (An older check, "recent Chromium + LanguageModel API",
+// started matching plain Chrome once Chrome passed version 150, which put Chrome users in space mode by mistake.)
+let diaCache = { value: false, at: 0 };
+async function isDia(windowId) {
+  // Once Dia, always Dia. A "no" is rechecked at most once a minute (the assistant tab may not exist yet).
+  if (diaCache.value || Date.now() - diaCache.at < 60_000) return diaCache.value;
+  diaCache = { value: await detectDia(windowId), at: Date.now() };
+  return diaCache.value;
+}
+async function detectDia(windowId) {
+  if (/\bDia\b/i.test(navigator.userAgent)) return true;
+  if ((navigator.userAgentData?.brands || []).some((b) => /\bDia\b/i.test(b.brand))) return true;
+  try {
+    const tabs = await chrome.tabs.query(windowId ? { windowId } : {});
+    return tabs.some((t) => /^chrome:\/\/(assistant|start-page)\//.test(t.url || t.pendingUrl || ""));
+  } catch { return false; }
 }
 chrome.storage.onChanged.addListener((c) => { if (c.autoTidy) buildMenus(); });
 
@@ -71,7 +92,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   const run = (fn) => fn().then(reply).catch((e) => reply({ error: errMsg(e) }));
-  if (msg.type === "tidy") { run(() => runWithFeedback(tidy)); return true; }
+  if (msg.type === "tidy") { run(() => runWithFeedback(() => tidy({ fromOptions: !!msg.fromOptions }))); return true; }
+  if (msg.type === "applyPreview") { run(() => runWithFeedback(applyPreview)); return true; }
+  if (msg.type === "cancelPreview") { run(async () => { await chrome.storage.local.remove("pendingPlan"); return { ok: true }; }); return true; }
   if (msg.type === "ungroup") { run(() => runWithFeedback(ungroup)); return true; }
   if (msg.type === "undo") { run(() => runWithFeedback(undoTidy)); return true; }
   if (msg.type === "saveSession") { run(() => saveSession(msg.name)); return true; }
@@ -80,6 +103,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg.type === "forgetRule") { run(async () => { await saveRules((await loadRules()).filter((_, i) => i !== msg.index)); return { ok: true }; }); return true; }
   if (msg.type === "forgetAll") { run(async () => { await chrome.storage.sync.set({ rules: [] }); return { ok: true }; }); return true; }
   if (msg.type === "diag") { run(diag); return true; }
+  if (msg.type === "trial") { run(async () => ({ left: await trialLeft(), limit: TRIAL_LIMIT, configured: trialConfigured(), shareUrl: shareUrl() })); return true; }
   if (msg.type === "testai") { run(testAI); return true; }
 });
 
@@ -90,7 +114,12 @@ async function runWithFeedback(fn) {
   try { result = await fn(); } catch (e) { result = { error: errMsg(e) }; }
   const ok = !result?.error;
   await chrome.storage.local.set({ lastResult: { at: Date.now(), ...result } });
-  await setBadge(ok ? "✓" : "!", ok ? "#16a34a" : "#dc2626");
+  // A tidy that made nothing shows "0", not a tick, and the reason goes in the icon's hover text, so a
+  // click that changes nothing (or fails) doesn't look like the extension is dead.
+  const nothing = ok && result?.groups === 0 && !result.preview;
+  await setBadge(ok ? (nothing ? "0" : "✓") : "!", ok ? (nothing ? "#6b7280" : "#16a34a") : "#dc2626");
+  const why = ok ? (nothing ? result.note || "Nothing to group right now." : "") : result.error;
+  try { await chrome.action.setTitle({ title: why ? `Tidy Tabs: ${why}`.slice(0, 280) : DEFAULT_TITLE }); } catch {}
   setTimeout(refreshBadge, 2500);
   return result;
 }
@@ -100,17 +129,13 @@ async function runWithFeedback(fn) {
 // Kept to the last 60 entries in local storage; shown under "Technical details".
 // =============================================================================================
 
-async function logEvent(kind, detail) {
-  try {
-    const { evlog = [] } = await chrome.storage.local.get("evlog");
-    evlog.push({ t: Date.now(), kind, ...detail });
-    await chrome.storage.local.set({ evlog: evlog.slice(-60) });
-  } catch {}
+// In memory only: this used to cost two storage writes on every tab event, forever, for a debugging aid.
+const evlog = [];
+function logEvent(kind, detail) {
+  evlog.push({ t: Date.now(), kind, ...detail });
+  if (evlog.length > 60) evlog.shift();
 }
-chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  let t = null; try { t = await chrome.tabs.get(tabId); } catch {}
-  logEvent("activated", { id: tabId, index: t?.index, title: (t?.title || "").slice(0, 30) });
-});
+chrome.tabs.onActivated.addListener(({ tabId }) => logEvent("activated", { id: tabId }));
 chrome.tabs.onMoved.addListener((id, info) => logEvent("moved", { id, from: info.fromIndex, to: info.toIndex }));
 chrome.tabs.onCreated.addListener((t) => logEvent("created", { id: t.id, index: t.index, url: (t.url || t.pendingUrl || "").slice(0, 40) }));
 chrome.tabs.onRemoved.addListener((id) => logEvent("removed", { id }));
@@ -143,7 +168,7 @@ function scheduleAuto() {
   clearTimeout(autoTimer);
   autoTimer = setTimeout(async () => {
     await refreshBadge();
-    const { autoTidy = false, autoThreshold = 8, provider = "domain", apiKey = "" } =
+    const { autoTidy = false, autoThreshold = 8, provider = "gemini", apiKey = "" } =
       await chrome.storage.sync.get(["autoTidy", "autoThreshold", "provider", "apiKey"]);
     if (!autoTidy || isBusy()) return;
     if (provider !== "domain" && provider !== "ondevice" && !apiKey) return;   // no key: don't surprise people with domain groups
@@ -175,17 +200,92 @@ refreshBadge();
 // Tidy
 // =============================================================================================
 
-async function tidy() {
-  if (isBusy()) return { error: "Already tidying — give it a moment" };
+async function tidy(opts = {}) {
+  if (isBusy()) return { error: "Already tidying, give it a moment" };
   busySince = Date.now();
-  try { return await tidyInner(); } finally { busySince = 0; refreshBadge(); }
+  try {
+    const r = await tidyInner(opts);
+    // Preview mode: the plan is waiting on the settings page, so take the person there.
+    if (r?.preview && !opts.fromOptions) chrome.runtime.openOptionsPage();
+    return r;
+  } finally { busySince = 0; refreshBadge(); }
 }
 
-async function tidyInner() {
+// Apply a plan the person approved on the settings page.
+async function applyPreview() {
+  const { pendingPlan } = await chrome.storage.local.get("pendingPlan");
+  if (!pendingPlan) return { error: "No preview waiting. Tidy again to make one." };
+  await chrome.storage.local.remove("pendingPlan");
+  return tidy({ plan: pendingPlan.plan, mode: pendingPlan.mode, fromOptions: true });
+}
+
+// Groups made in "by website" mode are not real topic groups. In AI mode they get re-sorted even when
+// "Leave existing groups alone" is on, so the first real tidy after adding a key actually changes something.
+async function domainGroupIds(windowId) {
+  const { domainGroups = [] } = await chrome.storage.local.get("domainGroups");
+  const live = new Set((await queryGroups(windowId)).map((g) => g.id));
+  return new Set(domainGroups.filter((id) => live.has(id)));
+}
+
+// ---- Free trial ------------------------------------------------------------------------------
+// A few tidies through the developer's server so the first click works with no setup. The Gemini key
+// lives on that server, never in the extension. The server is the one counting; the local number is a cache.
+const TRIAL_URL = "https://tidy-tabs.varun-puskur-dev.workers.dev";
+const TRIAL_LIMIT = 10;
+const trialConfigured = () => !TRIAL_URL.includes("REPLACE_ME");
+
+async function installId() {
+  const { installId: id } = await chrome.storage.local.get("installId");
+  if (id) return id;
+  const fresh = crypto.randomUUID();
+  await chrome.storage.local.set({ installId: fresh });
+  return fresh;
+}
+async function trialLeft() {
+  if (!trialConfigured()) return 0;
+  const { trialLeft: n = TRIAL_LIMIT } = await chrome.storage.local.get("trialLeft");
+  return n;
+}
+async function pickMode(provider, apiKey) {
+  if (provider === "domain" || provider === "ondevice") return provider;
+  if (apiKey && ["gemini", "anthropic", "openai"].includes(provider)) return provider;
+  return (await trialLeft()) > 0 ? "trial" : "needkey";
+}
+function needKey(opts = {}) {
+  if (!opts.fromOptions) chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html#key") });
+  return { error: `Your ${TRIAL_LIMIT} free tidies are used up. Add a free Gemini key to keep going; it takes about a minute.`, needKey: true };
+}
+async function askTrial(prompt) {
+  const id = await installId();
+  const r = await fetchWithTimeout(TRIAL_URL + "/tidy", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, prompt }),
+  }, 25_000);   // the browser kills an extension's background worker if a request takes over 30s to answer
+  let j = {}; try { j = await r.json(); } catch {}
+  if (typeof j.remaining === "number") await chrome.storage.local.set({ trialLeft: j.remaining });
+  if (r.ok && j.text) { lastModel = "free trial"; return j.text; }
+  if (r.status === 402) { const e = new Error("Free tidies used up"); e.trialUsed = true; throw e; }
+  throw new Error(j.message || `The free trial server didn't answer (HTTP ${r.status}). Try again, or add your own free key in Settings.`);
+}
+
+const STORE_URL = "https://chromewebstore.google.com/detail/cadaopjbichjjgljabfkokckndfgnpoa";
+// Share links go through the trial server, which counts the click and forwards to the store.
+const shareUrl = () => (trialConfigured() ? TRIAL_URL + "/get" : STORE_URL + "?utm_source=share&utm_medium=friend");
+
+function setUninstallUrl() {
+  if (!trialConfigured()) return;
+  try { chrome.runtime.setUninstallURL(`${TRIAL_URL}/bye?v=${chrome.runtime.getManifest().version}`); } catch {}
+}
+setUninstallUrl();
+
+async function tidyInner(opts = {}) {
   const win = await focusedWindow();
   const all = (await inScope(await chrome.tabs.query({ windowId: win.id }))).filter((t) => !t.pinned);
-  const { provider = "domain", apiKey = "", keepGroups = true, closeDupes = false, otherGroup = false, granularity = "balanced" } =
-    await chrome.storage.sync.get(["provider", "apiKey", "keepGroups", "closeDupes", "otherGroup", "granularity"]);
+  const { provider = "gemini", apiKey = "", keepGroups = true, closeDupes = false, otherGroup = false, granularity = "balanced", previewFirst = false } =
+    await chrome.storage.sync.get(["provider", "apiKey", "keepGroups", "closeDupes", "otherGroup", "granularity", "previewFirst"]);
+  // Which engine this tidy uses. No key yet means the free trial; when that runs out we ask for a key
+  // instead of quietly grouping by website (people took that for the AI and uninstalled).
+  const mode = opts.mode || await pickMode(provider, apiKey);
+  if (mode === "needkey") return needKey(opts);
 
   // Duplicates: runs on every unpinned tab (closing works even on internal pages), keeps the newest copy,
   // and never closes the tab the person is looking at.
@@ -204,32 +304,56 @@ async function tidyInner() {
   const tabs = all.filter((t) => isWebTab(t) && !isProtected(t, prot));
   if (tabs.length < 2) {
     const { scope = "window" } = await chrome.storage.sync.get("scope");
-    const hint = scope === "space" && tabs.length === 0 ? " Click a tab in the space you want tidied first, so I know which space you're in." : "";
-    return { groups: 0, tabs: tabs.length, dupes, skipped: [], note: hint.trim() };
+    const hint = scope === "space" && tabs.length === 0
+      ? " Nothing happened because I couldn't tell which space you're in. Click any tab in the space you want tidied, then tidy again."
+      : tabs.length < 2 ? ` Only ${tabs.length} loose tab${tabs.length === 1 ? "" : "s"} in scope; grouping needs at least 2.` : "";
+    return { groups: 0, tabs: tabs.length, dupes, skipped: [], mode, note: hint.trim() };
   }
 
-  const existing = await queryGroups(win.id);
-  const todo = keepGroups ? tabs.filter((t) => t.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) : tabs;
-  await snapshotForUndo(tabs, existing, dupes);
+  const allGroups = await queryGroups(win.id);
+  const stale = mode === "domain" ? new Set() : await domainGroupIds(win.id);   // website groups to re-sort in AI mode
+  const inScopeGroups = new Set(all.map((t) => t.groupId));
+  const existing = allGroups.filter((g) => !stale.has(g.id) && inScopeGroups.has(g.id));
+  const todo = keepGroups ? tabs.filter((t) => t.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE || stale.has(t.groupId)) : tabs;
   if (todo.length === 0) {
     const { scope = "window" } = await chrome.storage.sync.get("scope");
     const note = tabs.length
       ? `All ${tabs.length} tab${tabs.length === 1 ? "" : "s"} in ${scope === "space" ? "this space" : "scope"} are already grouped. Turn off "Leave existing groups alone" to re-sort them.`
       : "";
-    return { groups: 0, tabs: 0, dupes, skipped: [], note };
+    return { groups: 0, tabs: 0, dupes, skipped: [], mode, note };
   }
 
   // Remember which space this tidy is for (Dia can only group tabs in the space that's showing).
-  const startRun = await currentRunId(win.id);
+  // Dia only: in other browsers there are no spaces, and treating a click on another tab as "switched
+  // spaces" made the tidy stall for 20 seconds and then give up.
+  const spaceMode = ((await chrome.storage.sync.get("scope")).scope || "window") === "space" && (await isDia(win.id));
+  const startRun = spaceMode ? await currentRunId(win.id) : null;
 
-  const plan = (provider === "domain" || (provider !== "ondevice" && !apiKey))
-    ? byDomain(todo)
-    : await byAI(todo, existing.map((g) => g.title).filter(Boolean), provider, apiKey, granularity);
+  // Very big windows: send the most recently used tabs only, so the request stays a sensible size.
+  // The rest stay loose this time and get picked up by the next tidy.
+  const sendable = todo.length > MAX_TABS_PER_TIDY
+    ? [...todo].sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0)).slice(0, MAX_TABS_PER_TIDY)
+    : todo;
+  const plan = opts.plan
+    ? opts.plan
+    : mode === "domain"
+      ? byDomain(todo)
+      : await byAI(sendable, groupContext(existing, all), mode, apiKey, granularity).catch((e) => { if (e.trialUsed) return null; throw e; });
+  if (!plan) return needKey(opts);
+
+  // Preview: show the plan on the settings page and wait for "Apply" instead of grouping now.
+  if (previewFirst && !opts.plan) {
+    const titleOf = Object.fromEntries(todo.map((t) => [t.id, (t.title || t.url || "").slice(0, 60)]));
+    const groups = Object.entries(plan)
+      .filter(([title, ids]) => (otherGroup || !/^other$/i.test(title.trim())) && ids.length >= (/^other$/i.test(title.trim()) ? 1 : 2))
+      .map(([title, ids]) => ({ title, tabs: ids.map((id) => titleOf[id]).filter(Boolean) }));
+    await chrome.storage.local.set({ pendingPlan: { plan, mode, at: Date.now() } });
+    return { preview: true, previewGroups: groups, groups: groups.length, tabs: todo.length, dupes, skipped: [], mode, scope: (await chrome.storage.sync.get("scope")).scope || "window" };
+  }
 
   // If the person switched spaces while the model was thinking, wait (up to 20s) for them to come back;
   // grouping tabs in a hidden space is refused by Dia and leaves half-made groups behind.
-  const { scope: scopeNow = "window" } = await chrome.storage.sync.get("scope");
-  if (scopeNow === "space" && startRun !== null) {
+  if (spaceMode && startRun !== null) {
     const ok = await waitForRun(win.id, startRun, 20_000);
     if (!ok) {
       await setBadge("↩", "#d97706"); setTimeout(refreshBadge, 4000);
@@ -237,9 +361,13 @@ async function tidyInner() {
     }
   }
 
+  await snapshotForUndo(tabs, allGroups, dupes);   // only now: a tidy that failed above must not wipe the last undo
   const byId = Object.fromEntries(todo.map((t) => [t.id, t]));
   const refused = new Map();   // tabId -> error; a tab the browser refuses once is skipped for the rest of the run
   let made = 0, aborted = false;
+  const madeIds = [];
+  const taken = new Set(existing.map((g) => g.color));
+  const palette = [...COLORS.filter((c) => !taken.has(c) && c !== "grey"), ...COLORS.filter((c) => taken.has(c) && c !== "grey"), "grey"];
 
   for (const [title, ids] of Object.entries(plan)) {
     const isOther = /^other$/i.test(title.trim());
@@ -251,13 +379,22 @@ async function tidyInner() {
     if (match) { await addToGroup(match.id, valid, refused); continue; }
     if (!isOther && valid.length < 2) continue;
 
-    if (scopeNow === "space" && startRun !== null && (await currentRunId(win.id)) !== startRun) {
+    if (spaceMode && startRun !== null && (await currentRunId(win.id)) !== startRun) {
       if (!(await waitForRun(win.id, startRun, 15_000))) { aborted = true; break; }
     }
     const groupId = await makeGroup(valid, win.id, refused);
     if (groupId == null) continue;
+    madeIds.push(groupId);
     if (isOther) await updateGroup(groupId, { title: "Other", color: "grey", collapsed: true });
-    else { await updateGroup(groupId, { title, color: COLORS[made % COLORS.length], collapsed: false }); made++; }
+    else { await updateGroup(groupId, { title, color: palette[made % palette.length], collapsed: false }); made++; }
+  }
+
+  // Keep track of which groups were made by website rather than by topic (see domainGroupIds).
+  {
+    const { domainGroups = [] } = await chrome.storage.local.get("domainGroups");
+    const liveIds = new Set((await queryGroups(win.id)).map((g) => g.id));
+    const kept = domainGroups.filter((id) => liveIds.has(id) && !stale.has(id));
+    await chrome.storage.local.set({ domainGroups: mode === "domain" ? [...new Set([...kept, ...madeIds])] : kept });
   }
 
   const skipped = [...refused].map(([id, err]) => ({ title: (byId[id]?.title || String(id)).slice(0, 40), err }));
@@ -265,9 +402,10 @@ async function tidyInner() {
   await rememberPlacements(win.id, todo);
   const { scope = "window" } = await chrome.storage.sync.get("scope");
   let warn = lastUpdateError ? `Couldn't set a group's name/color: ${lastUpdateError}` : "";
-  if (aborted) warn = `Stopped partway because you switched spaces — ${made} group${made === 1 ? "" : "s"} made. Go back and tidy again to finish.`;
+  if (aborted) warn = `Stopped partway because you switched spaces, so only ${made} group${made === 1 ? "" : "s"} made. Go back and tidy again to finish.`;
+  if (!aborted && sendable.length < todo.length) warn = (warn ? warn + " " : "") + `Sorted your ${sendable.length} most recent tabs; tidy again for the other ${todo.length - sendable.length}.`;
   lastUpdateError = "";
-  return { groups: made, tabs: todo.length, dupes, skipped, scope, note: warn };
+  return { groups: made, tabs: todo.length, dupes, skipped, scope, mode, note: warn };
 }
 
 // =============================================================================================
@@ -531,7 +669,11 @@ function byDomain(tabs) {
   const plan = {};
   for (const t of tabs) {
     let host = "Other";
-    try { host = new URL(t.url).hostname.replace(/^www\./, "").split(".").slice(-2, -1)[0] || "Other"; } catch {}
+    try {
+      const parts = new URL(t.url).hostname.replace(/^www\./, "").split(".");
+      const twoPartTld = parts.length > 2 && parts.at(-1).length === 2 && /^(co|com|org|net|ac|gov|edu)$/.test(parts.at(-2));
+      host = parts.at(twoPartTld ? -3 : -2) || parts[0] || "Other";
+    } catch {}
     const title = host.charAt(0).toUpperCase() + host.slice(1);
     (plan[title] ||= []).push(t.id);
   }
@@ -541,75 +683,181 @@ function byDomain(tabs) {
 let lastModel = "";   // which model answered most recently; shown by "Test AI key"
 let lastRaw = "";     // the model's raw reply, for diagnostics
 
-async function byAI(tabs, existingTitles, provider, apiKey, granularity = "balanced") {
-  const list = tabs.map((t) => `${t.id}\t${(t.title || "").slice(0, 80)}\t${(t.url || "").slice(0, 120)}`).join("\n");
-  // A concrete example with real ids: small local models copy placeholder examples literally.
-  const ex = tabs.slice(0, 3).map((t) => t.id);
-  const example = ex.length >= 3 ? `{"Example topic": [${ex[0]}, ${ex[1]}], "Other": [${ex[2]}]}` : `{"Example topic": [${ex.join(", ")}]}`;
+const MAX_TABS_PER_TIDY = 150;
 
-  const n = tabs.length;
+// Existing groups as the model sees them: name plus a few tab titles, so "LEGO" means something and a new
+// LEGO tab joins it instead of starting "LEGO sets".
+function groupContext(groups, tabs) {
+  return groups.filter((g) => g.title).map((g) => ({
+    title: g.title,
+    samples: tabs.filter((t) => t.groupId === g.id).slice(0, 3).map((t) => cleanTitle(t.title).slice(0, 40)),
+  }));
+}
+
+// Titles carry noise that costs tokens and misleads: "(3) Inbox", "● Untitled", runs of spaces.
+function cleanTitle(title) {
+  return (title || "").replace(/^\(\d+\+?\)\s*/, "").replace(/^[●•*]\s*/, "").replace(/\s+/g, " ").trim();
+}
+// URLs: host and path are what say what a page is. Scheme, "www.", query strings and fragments are mostly
+// tracking ids, tokens and noise, and they can be long.
+function compactUrl(url) {
+  try {
+    const u = new URL(url);
+    return (u.hostname.replace(/^www\./, "") + u.pathname.replace(/\/$/, "")).slice(0, 70);
+  } catch { return (url || "").slice(0, 70); }
+}
+
+async function byAI(tabs, existing, provider, apiKey, granularity = "balanced") {
+  existing = existing.map((g) => (typeof g === "string" ? { title: g, samples: [] } : g));
+  // Free trial goes to Gemini's free tier, whose terms say not to send personal info: drop email addresses
+  // (Gmail puts yours in its tab title). compactUrl already removes query strings and fragments.
+  const scrub = provider === "trial" ? (x) => x.replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, "[email]") : (x) => x;
+
+  // Number the tabs 1..N in tab-bar order. Models copy short numbers reliably; raw tab ids are ten digits
+  // long and get shortened or mistyped, which loses tabs or fails the whole tidy (seen in the benchmark).
+  const ordered = [...tabs].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  const numOf = new Map(ordered.map((t, i) => [t.id, i + 1]));
+  const idOf = new Map(ordered.map((t, i) => [i + 1, t.id]));
+  const n = ordered.length;
+  const list = ordered.map((t, i) => {
+    const from = t.openerTabId && numOf.get(t.openerTabId);
+    return `${i + 1}\t${scrub(cleanTitle(t.title).slice(0, 90))}\t${scrub(compactUrl(t.url))}${from ? `\tfrom ${from}` : ""}`;
+  }).join("\n");
+
+  // How finely to split. Deliberately no target number of groups: asking for "6-9 groups" made models cut one
+  // task in two to hit the number, and capped big windows so most tabs fell into Other.
   const levels = {
-    broad: {
-      size: "Prefer a few large groups. A slightly broader name is fine when it lets a related tab join.",
-      count: `Aim for 2-4 groups.`, max: 99,
-    },
-    balanced: {
-      size: "Group by the specific project or activity, not the general field: \"LeetCode\" and \"CS50\" are different groups even though both are coding; \"Flights\" and \"Hotels\" can share a \"Japan trip\" group because they're one task.",
-      count: `Aim for ${Math.max(2, Math.min(8, Math.round(n / 4)))}-${Math.max(3, Math.min(10, Math.round(n / 2.5)))} groups.`, max: 8,
-    },
-    specific: {
-      size: "Be precise. Each group is one concrete task, site, or subject: separate LeetCode problems from CS50 lectures from unrelated videos. Never merge different subjects just because they're both \"work\" or \"coding\".",
-      count: `Aim for ${Math.max(3, Math.min(10, Math.round(n / 3)))}-${Math.max(4, Math.min(12, Math.round(n / 2)))} groups.`, max: 5,
-    },
+    broad: "Prefer fewer, larger groups: closely related goals may share one group (all trip planning together, all coursework for a term together).",
+    balanced: "Do not cut one goal into parts (\"Lisbon flights\" plus \"Lisbon sightseeing\" is wrong; \"Lisbon trip\" is right) unless it would have more than 12 tabs.",
+    specific: "Split finely: inside a big goal, separate clear sub-tasks when each has at least 2 tabs (flights apart from hotels; one group per assignment).",
   };
-  const g = levels[granularity] || levels.balanced;
 
-  const prompt = `You are tidying a browser sidebar. Group these tabs by what the person is actually working on, the way they would organize them by hand.
+  // The examples below are deliberately about things unlikely to be in anyone's tabs, and none of them
+  // appear in test/bench-data.js, so the benchmark can't be passed by parroting the prompt.
+  const prompt = `You are tidying a browser sidebar. Sort this person's open tabs into tab groups the way they would by hand.
 
-Rules:
-- Group names: 1-3 words, specific enough that a stranger would know what's inside.
-- ${g.size}
-- ${g.count} A group needs at least 2 tabs. No group may have more than ${g.max} tabs; if it would, split it by subtopic.
-- Everyday tools (email inbox, calendar, drive, messaging, settings) do NOT belong in a topic group. Leave them in "Other" unless the title clearly ties them to a project.
-- Unrelated one-off pages and random videos go in "Other" rather than being forced into the nearest group.
-- AI chat tabs (ChatGPT, Claude, Gemini, etc.) go with the project their title is about, if one exists; otherwise "Other".
-- Every tab id appears exactly once.${existingTitles.length ? `
-- These groups already exist; reuse their exact names when a tab fits: ${existingTitles.join(", ")}.` : ""}
+Step 1. Read every tab and work out the distinct things this person is in the middle of: a course, a trip, a purchase they are comparing, a bug, a hobby, an event they are planning. Each of those is a group.
+Step 2. Give every tab exactly one home: one of those groups, or "Other".
 
-${await rulesBlock()}
+What makes a group
+- One goal is one group, whatever sites it spans. Flights, hotels, a map, a Reddit thread and a YouTube video about the same trip all belong together.
+- ${levels[granularity] || levels.balanced}
+- Different goals stay apart even when they are the same kind of thing or on the same site. Two courses are two groups. A Google Doc for a history essay and a Google Doc for a moving checklist go to different groups. A chess opening video and a bread baking video on YouTube have nothing to do with each other.
+- A group needs at least 2 tabs.
 
-Return ONLY a JSON object. Keys are group names you invent; values are arrays of the numeric ids from the list below. The shape is like ${example} but with your own group names and all ${n} ids.
+What goes in "Other"
+- Everyday tools the person keeps open rather than works on: email inbox, calendar, chat and messaging, a drive or files home, music, bank and account dashboards, a site's home page or feed, an overview list of all issues or documents. Only put one in a group when its title clearly names that group's subject.
+- One-off pages that relate to nothing else here. Never stretch a group to fit a stray, and never invent a group just to empty Other.
+- AI chat tabs (ChatGPT, Claude, Gemini) go with the group their title is about, otherwise Other.
 
-id\ttitle\turl
+Names
+- 1 to 3 words naming the specific thing: the course code, the place, the product, the project ("BIO 201", "Lisbon trip", "Standing desk", "Billing migration").
+- Never a broad category such as Work, School, Research, Shopping, Entertainment, Videos, Reading, Social or Misc.
+- Use the language the tabs are in.
+
+Hints
+- Tabs are listed in tab-bar order. Neighbours were often opened together, and "from N" means the tab was opened from tab N. Both are weak evidence; titles and addresses decide.
+${existing.length ? `
+These groups already exist. When a tab fits one, use its exact name (no near-duplicate like "Chess openings" next to "Chess"):
+${existing.map((g) => `  "${scrub(g.title)}"${g.samples.length ? `: ${g.samples.map(scrub).join("; ")}` : ""}`).join("\n")}
+` : ""}${await rulesBlock()}
+
+Answer with JSON only, in this shape:
+{"group name": [tab numbers], ..., "Other": [tab numbers]}  with every number from 1 to ${n} appearing exactly once
+
+Example
+1\tGolden retriever puppies near me - Petfinder\tpetfinder.com/search/dogs
+2\tInbox - Gmail\tmail.google.com/mail
+3\tPuppy first-week checklist - Google Docs\tdocs.google.com/document/d/1x\tfrom 1
+4\tCouch to 5K: week 1 - YouTube\tyoutube.com/watch
+5\tCrate training schedule : r/puppy101\treddit.com/r/puppy101/comments/1a
+6\tBest running shoes for beginners - Runner's World\trunnersworld.com/gear
+7\tHow do volcanoes form? - YouTube\tyoutube.com/watch
+Answer: {"Puppy adoption":[1,3,5],"5K training":[4,6],"Other":[2,7]}
+
+The tabs (number, title, address, opened from):
 ${list}`;
 
   const ask = () =>
     provider === "ondevice" ? askOnDevice(prompt)
+    : provider === "trial" ? askTrial(prompt)
     : provider === "gemini" ? askGemini(prompt, apiKey)
     : provider === "anthropic" ? askClaude(prompt, apiKey)
     : askOpenAI(prompt, apiKey);
 
-  const validIds = new Set(tabs.map((t) => t.id));
+  const valid = new Set(idOf.keys());
   let lastErr;
-  for (let attempt = 0; attempt < 2; attempt++) {     // one retry: local models occasionally mangle the JSON
-    try { return parsePlan(await ask(), validIds); }
-    catch (e) { lastErr = e; }
+  const attempts = provider === "trial" ? 1 : 2;       // one retry: local models occasionally mangle the JSON (not worth a trial tidy)
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const byNumber = parsePlan(await ask(), valid);
+      return Object.fromEntries(Object.entries(byNumber).map(([name, nums]) => [name, nums.map((k) => idOf.get(k))]));
+    } catch (e) { if (e.trialUsed) throw e; lastErr = e; }
   }
   throw lastErr;
 }
 
+// Turns the model's answer into { groupName: [tab numbers] }. Built to lose as few tabs as possible when the
+// answer isn't quite what was asked for: three shapes are understood, a cut-off answer still yields the groups
+// it finished, repeated or differently-cased names merge, and a tab listed twice goes to the first group.
 function parsePlan(text, validIds) {
-  const m = (text || "").match(/\{[\s\S]*\}/);
-  if (!m) throw new Error("Model returned no JSON");
-  let plan;
-  try { plan = JSON.parse(m[0]); } catch (e) { throw new Error("Model returned invalid JSON: " + errMsg(e)); }
+  // Everything from the first bracket on. The patterns below ignore trailing prose, and reading to the end
+  // (not just to the last closing bracket) is what lets a cut-off answer keep its half-finished last group.
+  const raw = (text || "").match(/[\[{][\s\S]*/);
+  if (!raw) throw new Error("Model returned no JSON");
+  let parsed = null;
+  try { parsed = JSON.parse((raw[0].match(/^[\s\S]*[\]}]/) || raw)[0]); } catch {}
+  const unesc = (s) => s.replace(/\\(.)/g, "$1");
+  let pairs = [];   // [group name, [tab numbers]]
+
+  // Shape A (what we ask for): {"name": [1, 2]}. Read from the text rather than JSON.parse, which keeps only
+  // the last of a repeated key (leaving the other tabs loose) and rejects trailing commas and cut-off answers.
+  pairs = [...raw[0].matchAll(/"((?:[^"\\\n]|\\.){1,80})"\s*:\s*\[([^\]]*)(\]|$)/g)].map((m) => {
+    const nums = m[2].match(/\d+/g) || [];
+    if (!m[3]) nums.pop();   // answer was cut off mid-list: the last number may be half-written
+    return [unesc(m[1]), nums];
+  });
+  if (!pairs.length) pairs = [...raw[0].matchAll(/'([^'\n]{1,80})'\s*:\s*\[([^\]]*)\]/g)].map((m) => [m[1], m[2].match(/\d+/g) || []]);
+
+  // Shape B: [{"name":"X","tabs":[1,2]}] or {"groups":[{...}]}. The regex above reads those as groups called
+  // "tabs" or "ids", so check for this shape first when the JSON parsed.
+  const listShape = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.groups) && typeof parsed.groups[0] === "object" ? parsed.groups : null;
+  if (listShape) pairs = listShape.filter((g) => g && typeof g === "object").map((g) => [g.name ?? g.title ?? g.group ?? "", g.tabs ?? g.ids ?? g.tab_ids ?? g.tabIds ?? []]);
+
+  // Shape C: one label per tab, {"tabs": {"1": "name", "2": "name"}}.
+  const perTab = [...raw[0].matchAll(/"(\d+)"\s*:\s*"((?:[^"\\\n]|\\.){1,80})"/g)];
+  if (perTab.length && !listShape) {
+    const by = new Map();
+    for (const m of perTab) { const name = unesc(m[2]); (by.get(name) || by.set(name, []).get(name)).push(Number(m[1])); }
+    pairs = [...by];
+  }
+  if (!pairs.length && parsed && typeof parsed === "object") pairs = Object.entries(parsed);
+  if (!pairs.length) throw new Error("Model returned invalid JSON");
+
   const clean = {};
-  for (const [k, v] of Object.entries(plan)) {
-    const ids = [].concat(v).map(Number).filter((id) => validIds.has(id));
-    if (ids.length) clean[String(k).trim()] = ids;
+  const keyOf = new Map();   // lowercase name -> the spelling we kept, so "Lego" and "LEGO" become one group
+  const used = new Set();    // models sometimes list a tab under two groups; first one wins
+  for (const [k, v] of pairs) {
+    const name = groupName(k);
+    if (!name) continue;
+    const ids = [].concat(v).map(Number).filter((id) => validIds.has(id) && !used.has(id) && used.add(id));
+    if (!ids.length) continue;
+    const key = keyOf.get(name.toLowerCase()) || name;
+    keyOf.set(name.toLowerCase(), key);
+    (clean[key] ||= []).push(...ids);
   }
   if (!Object.keys(clean).length) throw new Error("Model returned a plan with no real tab ids");
   return clean;
+}
+
+// Tidy a model-made group name: trim quotes and stray punctuation, cap length, and fold the many ways
+// models say "misc" into "Other" so strays follow the Other setting.
+function groupName(k) {
+  let n = String(k).replace(/^[\s"'`*_#-]+|[\s"'`*_:.,-]+$/g, "").replace(/\s+/g, " ");
+  if (/^(tabs|ids|tab_ids|tabids|groups|name|title)$/i.test(n)) return "";   // field names from a half-parsed answer, not groups
+  if (/^(other|others|misc|miscellaneous|uncategori[sz]ed|various|general|unsorted|ungrouped|random|none)$/i.test(n)) return "Other";
+  if (n.length > 30) n = n.slice(0, 30).replace(/\s+\S*$/, "");
+  return n;
 }
 
 // Each request gets its own deadline so a stalled provider fails loudly instead of leaving the badge on "…".
@@ -632,8 +880,8 @@ async function askGemini(prompt, apiKey) {
     for (let attempt = 0; attempt < 3; attempt++) {
       const t0 = Date.now();
       const generationConfig = minimal
-        ? { temperature: 0, maxOutputTokens: 2048 }
-        : { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } };
+        ? { temperature: 0, maxOutputTokens: 4096 }
+        : { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } };
       let r;
       try {
         r = await fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
@@ -657,7 +905,7 @@ async function askGemini(prompt, apiKey) {
       await sleep(2000);
     }
   }
-  throw new Error("Gemini unavailable —\n" + log.join("\n"));
+  throw new Error("Gemini unavailable:\n" + log.join("\n"));
 }
 
 // Which models can this key use? Lite first, stable before preview, newest first. Cached for an hour.
@@ -757,7 +1005,7 @@ async function askClaude(prompt, apiKey) {
       "anthropic-version": "2023-06-01",
       "anthropic-dangerous-direct-browser-access": "true",
     },
-    body: JSON.stringify({ model: "claude-haiku-5-5", max_tokens: 1024, messages: [{ role: "user", content: prompt }] }),
+    body: JSON.stringify({ model: "claude-haiku-5-5", max_tokens: 4096, messages: [{ role: "user", content: prompt }] }),
   });
   const j = await r.json();
   if (!r.ok) throw new Error(j.error?.message || r.statusText);
@@ -783,8 +1031,8 @@ async function askOpenAI(prompt, apiKey) {
 
 // Sends three neutral sample tabs to the configured provider and reports what came back.
 async function testAI() {
-  const { provider = "domain", apiKey = "" } = await chrome.storage.sync.get(["provider", "apiKey"]);
-  if (provider === "domain" || (provider !== "ondevice" && !apiKey)) return { ok: false, summary: "No AI key set. Pick a provider and paste a key above, then Save." };
+  const { provider = "gemini", apiKey = "" } = await chrome.storage.sync.get(["provider", "apiKey"]);
+  if (provider === "domain" || (provider !== "ondevice" && !apiKey)) return { ok: false, summary: "No AI key set. Pick a provider and paste a key above." };
   const sample = [
     { id: 1, title: "Flights to Tokyo - Google Flights", url: "https://www.google.com/travel/flights" },
     { id: 2, title: "Shinjuku hotels - Booking.com", url: "https://www.booking.com/city/jp/tokyo" },
@@ -794,7 +1042,7 @@ async function testAI() {
   if (provider === "ondevice") {
     await chrome.storage.local.remove("odProbe");   // a manual test should always re-probe
     raw.probe = await onDeviceIsReal();
-    if (!raw.probe.real) return { ok: false, summary: "The built-in model API is here but isn't a working model yet — it echoed the prompt back in " + raw.probe.ms + " ms instead of answering. On-device will light up when this browser ships real inference; use Gemini's free tier until then.", raw };
+    if (!raw.probe.real) return { ok: false, summary: "The built-in model API is here but isn't a working model yet: it echoed the prompt back in " + raw.probe.ms + " ms instead of answering. On-device will light up when this browser ships real inference; use Gemini's free tier until then.", raw };
   }
   const t0 = Date.now();
   try {
@@ -832,7 +1080,6 @@ async function diag() {
   }));
   raw.activeCount = everything.filter((t) => t.active).length;
   raw.highlightedCount = everything.filter((t) => t.highlighted).length;
-  const { evlog = [] } = await chrome.storage.local.get("evlog");
   const t0 = Date.now();
   raw.recentEvents = evlog.map((e) => ({ agoSec: Math.round((t0 - e.t) / 1000), ...e, t: undefined }));
 
@@ -877,7 +1124,7 @@ async function diag() {
   raw.onDevice = od;
   const odText = {
     available: od.real
-      ? "✅ Built-in on-device model works here — pick \"On-device\" in Grouping and no key is needed."
+      ? "✅ Built-in on-device model works here. Pick \"On-device\" in Grouping and no key is needed."
       : "🟡 This browser has the built-in model API, but it isn't a working model yet (it echoes prompts back). Use Gemini's free tier until the browser ships real on-device inference.",
     downloadable: "🟡 This browser has a built-in model but it isn't downloaded yet. Pick \"On-device\", run Test AI once to start the download (a couple of GB), then use it key-free.",
     downloading: "🟡 Built-in model is downloading. Once it finishes, \"On-device\" works with no key.",
@@ -910,13 +1157,18 @@ async function protectedSet() {
   const { protectedUrls = [] } = await chrome.storage.sync.get("protectedUrls");
   return new Set(protectedUrls);
 }
-const isProtected = (t, set) => set.has(protectKey(t.url || t.pendingUrl || ""));
+// A page is protected by its exact key, or by its whole site (what "pulled out of a group twice" adds).
+function isProtected(t, set) {
+  const url = t.url || t.pendingUrl || "";
+  if (set.has(protectKey(url))) return true;
+  try { return set.has("https://" + new URL(url).hostname.replace(/^www\./, "")); } catch { return false; }
+}
 
 // Scope: which tabs in the window are "mine right now". Browsers with spaces/profiles in one window (Dia)
 // don't tell extensions which space a tab belongs to, so "recently used" and "selected" are the proxies.
 async function inScope(tabs) {
   const { scope = "window", scopeHours = 2 } = await chrome.storage.sync.get(["scope", "scopeHours"]);
-  if (scope === "space") return currentSpaceTabs(tabs);
+  if (scope === "space") return (await isDia(tabs[0]?.windowId)) ? currentSpaceTabs(tabs) : tabs;
   if (scope === "highlighted") {
     const hl = tabs.filter((t) => t.highlighted);
     return hl.length > 1 ? hl : tabs;               // a lone active tab isn't a selection; fall back to everything
@@ -942,7 +1194,9 @@ let lastActiveId = 0;                  // the tab that was active before this ac
 const ID_GAP = 12;                     // tab ids within this of each other were created in the same burst (= same space)
 
 // Split web tabs into contiguous id runs; returns a Map tabId -> runIndex.
-function idRuns(tabs) {
+// Runs are then merged when a tab was opened from, or while looking at, a tab in another run: a tab you
+// open in a space belongs to that space even though its id is far from the space's older tabs.
+function idRuns(tabs, links = {}) {
   const sorted = tabs.filter(isWebTab).sort((a, b) => a.id - b.id);
   const runOf = new Map();
   let run = 0;
@@ -950,10 +1204,41 @@ function idRuns(tabs) {
     if (i > 0 && sorted[i].id - sorted[i - 1].id > ID_GAP) run++;
     runOf.set(sorted[i].id, run);
   }
+  // Union-find over runs.
+  const parent = [...Array(run + 1).keys()];
+  const find = (x) => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+  const join = (a, b) => { const ra = runOf.get(a), rb = runOf.get(b); if (ra !== undefined && rb !== undefined) parent[find(ra)] = find(rb); };
+  for (const t of sorted) if (t.openerTabId) join(t.id, t.openerTabId);
+  for (const [a, b] of Object.entries(links)) join(Number(a), b);
+  for (const [id, r] of runOf) runOf.set(id, find(r));
   return runOf;
 }
 
+chrome.runtime.onStartup.addListener(() => chrome.storage.session.set({ browserStart: Date.now() }).catch(() => {}));
+let spaceLinks = null;   // tabId -> the tab that was active when it was created
+async function getLinks() {
+  if (!spaceLinks) { try { spaceLinks = (await chrome.storage.local.get("spaceLinks")).spaceLinks || {}; } catch { spaceLinks = {}; } }
+  return spaceLinks;
+}
+chrome.tabs.onCreated.addListener(async (t) => {
+  if (!(await isDia(t.windowId))) return;
+  // Only a tab opened in the foreground (Cmd+T, a link opened normally). Background tabs carry openerTabId,
+  // which idRuns uses directly, and session restore creates a burst of background tabs that must not be
+  // tied to whatever tab happened to be active.
+  if (!t.active) return;
+  try { const { browserStart = 0 } = await chrome.storage.session.get("browserStart"); if (Date.now() - browserStart < 15_000) return; } catch {}
+  if (!lastActiveId) { try { lastActiveId = (await chrome.storage.local.get("lastActiveId")).lastActiveId || 0; } catch {} }
+  const to = t.openerTabId || lastActiveId;
+  if (!to || to === t.id) return;
+  const l = await getLinks();
+  l[t.id] = to;
+  const keys = Object.keys(l);
+  if (keys.length > 400) for (const k of keys.slice(0, keys.length - 400)) delete l[k];
+  try { await chrome.storage.local.set({ spaceLinks: l }); } catch {}
+});
+
 chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  if (!(await isDia(windowId))) return;   // spaces only exist in Dia; don't pay for this elsewhere
   const now = Date.now();
   let t = null; try { t = await chrome.tabs.get(tabId); } catch { return; }
   const url = t.url || t.pendingUrl || "";
@@ -964,7 +1249,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
   else if (!isOurs && isWebTab(t) && lastActiveId) {
     // Primary signal: did we land in a different id run than the tab we came from?
     const all = await chrome.tabs.query({ windowId });
-    const runOf = idRuns(all);
+    const runOf = idRuns(all, await getLinks());
     const from = runOf.get(lastActiveId), to = runOf.get(tabId);
     if (from !== undefined && to !== undefined && from !== to) switched = true;
     // Backup: a tab idle for a while, when nothing else nearby was touched, means we came from elsewhere.
@@ -980,10 +1265,11 @@ async function currentRunId(windowId) {
   try {
     const all = await chrome.tabs.query({ windowId });
     const active = all.find((t) => t.active);
+    const runOf = idRuns(all, await getLinks());
     if (!active || !isWebTab(active) || (active.url || "").startsWith(chrome.runtime.getURL(""))) {
-      const r = idRuns(all).get(lastActiveId); return r === undefined ? null : r;
+      const r = runOf.get(lastActiveId); return r === undefined ? null : r;
     }
-    const r = idRuns(all).get(active.id); return r === undefined ? null : r;
+    const r = runOf.get(active.id); return r === undefined ? null : r;
   } catch { return null; }
 }
 async function waitForRun(windowId, run, ms) {
@@ -1017,14 +1303,9 @@ async function currentSpaceTabs(tabs) {
   await seedAnchor();
   const web = tabs.filter(isWebTab);
   if (web.length === 0) return tabs;
-  const runOf = idRuns(tabs);
+  const runOf = idRuns(tabs, await getLinks());
 
   // Anchor: the last real tab we were on (not our own pages). Its id run is the current space.
-  // Seeds: tabs touched since we entered this space; they confirm/extend the run set.
-  const since = spaceEnteredAt || Date.now() - 30 * 60e3;
-  const seeds = web.filter((t) => (t.lastAccessed || 0) >= since - 2000);
-  // The anchor run is the space. Seeds only count if they're in the anchor run too — a seed from
-  // another run means we hopped spaces without the hop being detected, and must not widen the scope.
   let anchorRun = runOf.get(lastActiveId);
   if (anchorRun === undefined) {
     const active = web.find((t) => t.active);

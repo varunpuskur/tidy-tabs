@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Tidy Tabs — AI Tab Organizer & Group Manager",
-  "version": "1.8.0",
-  "description": "One click sorts your tabs into named AI groups. Free with Gemini, no account, no server. Works in Chrome, Dia, Brave & Edge.",
+  "name": "Tidy Tabs: AI Tab Organizer & Group Manager",
+  "version": "1.9.0",
+  "description": "One click sorts your tabs into named groups by topic. Try it free with no setup or account. Works in Chrome, Dia, Brave & Edge.",
   "permissions": [
     "tabs",
     "tabGroups",
@@ -18,7 +18,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Tidy tabs — right-click for Settings",
+    "default_title": "Tidy tabs · right-click for Settings",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"

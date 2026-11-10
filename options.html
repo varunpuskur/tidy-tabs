@@ -56,12 +56,13 @@
     <div class="stack">
       <select id="provider">
         <option value="domain">By domain (no API key)</option>
-        <option value="ondevice">On-device — browser's built-in model (free, no key)</option>
-        <option value="gemini">AI — Gemini (Google key, free tier)</option>
-        <option value="anthropic">AI — Claude (Anthropic key)</option>
-        <option value="openai">AI — OpenAI key</option>
+        <option value="ondevice">On-device: browser's built-in model (free, no key)</option>
+        <option value="gemini">AI: Gemini (Google key, free tier)</option>
+        <option value="anthropic">AI: Claude (Anthropic key)</option>
+        <option value="openai">AI: OpenAI key</option>
       </select>
       <input id="apiKey" type="password" placeholder="API key" autocomplete="off">
+      <div class="status" id="trialNote" hidden></div>
       <div id="odBox" hidden style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--bg)">
         <div class="status" id="odStatus">Checking built-in model…</div>
         <div id="odBar" hidden style="height:6px;border-radius:3px;background:var(--line);margin-top:8px;overflow:hidden"><div id="odFill" style="height:100%;width:0;background:var(--accent);transition:width .3s"></div></div>
@@ -73,10 +74,11 @@
       <select id="scope" style="width:auto"><option value="space">Current space (Dia)</option><option value="recent">Recently used</option><option value="window">Whole window</option></select></div>
     <div class="row" id="scopeHoursRow"><label>Recently used means<span class="hint">Tabs you've opened or looked at within this many hours.</span></label>
       <span><input id="scopeHours" type="number" min="0.5" max="72" step="0.5" style="width:70px"> h</span></div>
-    <div class="row"><label>Granularity<span class="hint">How finely to split. Balanced caps groups at 8 tabs; Specific separates every subject.</span></label>
+    <div class="row"><label>Granularity<span class="hint">Broad: fewer, bigger groups. Balanced: one group per thing you're working on. Specific: splits big tasks into sub-tasks.</span></label>
       <select id="granularity" style="width:auto"><option value="broad">Broad</option><option value="balanced">Balanced</option><option value="specific">Specific</option></select></div>
     <div class="row"><label>Leave existing groups alone<span class="hint">Only loose tabs are sorted; new tabs join a matching group by name.</span></label><input id="keepGroups" type="checkbox"></div>
     <div class="row"><label>Close duplicate tabs<span class="hint">Keeps the newest copy; never closes the tab you're on.</span></label><input id="closeDupes" type="checkbox"></div>
+    <div class="row"><label>Preview before applying<span class="hint">Shows the proposed groups here first; nothing moves until you click Apply.</span></label><input id="previewFirst" type="checkbox"></div>
     <div class="row"><label>Collect strays in an "Other" group<span class="hint">Off: strays stay loose, like Arc. On: a collapsed grey group at the bottom.</span></label><input id="otherGroup" type="checkbox"></div>
   </section>
 
@@ -118,6 +120,10 @@
     <div class="status" id="diagOut" style="margin-top:12px;white-space:pre-line"></div>
     <details id="rawWrap" hidden style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:13px">Technical details</summary><pre id="out"></pre></details>
   </section>
-  <footer style="margin-top:36px;text-align:center;color:var(--muted);font-size:13px">Made by Varun Puskur · <a href="https://github.com/varunpuskur/tidy-tabs">GitHub</a></footer>
+  <section>
+    <h2>Share with a friend</h2>
+    <div style="display:flex;gap:8px"><input id="shareUrl" readonly style="flex:1;min-width:0"><button id="copyShare">Copy link</button></div>
+  </section>
+  <footer style="margin-top:36px;text-align:center;color:var(--muted);font-size:13px">Made by Varun Puskur · <a href="https://github.com/varunpuskur/tidy-tabs">GitHub</a> · <a href="https://chromewebstore.google.com/detail/cadaopjbichjjgljabfkokckndfgnpoa/reviews" target="_blank">Rate it</a></footer>
   <script src="options.js"></script>
 </main></body></html>

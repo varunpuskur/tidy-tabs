@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>What's new in Tidy Tabs</title>
+<link rel="stylesheet" href="pages.css">
+</head>
+<body><main>
+  <h1>🧹 What's new in Tidy Tabs <span id="ver"></span></h1>
+  <p class="lead">Thanks for using it. Here's what changed. This page only shows up for bigger updates.</p>
+
+  <div class="card">
+    <ul class="new">
+      <li><b>Fixed "no tabs found" in Chrome.</b> Chrome was being mistaken for Dia, so it only looked at a tab or two. It now tidies the whole window, like it should.</li>
+      <li><b>Better space detection in Dia.</b> Tabs you open in a space now count as part of that space right away.</li>
+      <li><b>Groups by topic, not website.</b> Two Google Docs about different projects now land in different groups.</li>
+      <li><b>Much more accurate grouping.</b> One group per thing you're working on: a trip is one group, not "flights" and "sightseeing". Email, calendar and one-off pages are left alone. New tabs join the group they belong to.</li>
+      <li><b>Works on huge windows.</b> 100+ tabs used to leave most of them ungrouped. Not any more.</li>
+      <li><b>Adding a key fixes old website groups.</b> Groups made without AI get re-sorted by topic on your next tidy.</li>
+      <li><b>Preview before applying</b> (optional, in Settings): see the groups first, then click Apply.</li>
+      <li><b>New users get 10 free tidies</b> before needing a key, so your friends can try it in one click.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Know someone drowning in tabs?</h2>
+    <div class="share"><input id="shareUrl" readonly><button id="copy">Copy link</button></div>
+    <p class="small" style="margin-top:10px">And if it's saving you time, a <a id="rate" href="#" target="_blank">rating on the Chrome Web Store</a> helps a lot. It's made by one student.</p>
+  </div>
+
+  <p class="done"><a href="#" id="settings">Settings</a> · <a href="https://github.com/varunpuskur/tidy-tabs" target="_blank">GitHub</a></p>
+  <script src="whatsnew.js"></script>
+</main></body></html>

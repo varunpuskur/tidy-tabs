@@ -1,0 +1,8 @@
+name = "tidy-tabs"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+# Run `npx wrangler kv namespace create TRIAL` once and paste the id it prints here.
+[[kv_namespaces]]
+binding = "TRIAL"
+id = "cd973a8c0e174fb1a4bf1d427bfa313a"
